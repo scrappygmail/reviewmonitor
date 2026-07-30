@@ -1,0 +1,24 @@
+name: Cleanup old reviews (90-day retention)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # once daily
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install supabase python-dotenv
+      - name: Run cleanup
+        working-directory: scraper-worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: python cleanup_old_reviews.py

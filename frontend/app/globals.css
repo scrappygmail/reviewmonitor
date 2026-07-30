@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-feature-settings: "ss01";
+}
+
+::selection {
+  background: #E0E7FF;
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid #4F46E5;
+  outline-offset: 2px;
+}

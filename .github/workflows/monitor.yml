@@ -1,0 +1,35 @@
+name: Monitor watch list (every 6h)
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:   # lets the "Check Now" button in the UI trigger this manually
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install our sync/notify dependencies
+        run: pip install -r scraper-worker/requirements.txt
+
+      - name: Clone the review-scraping engine
+        run: |
+          git clone --depth 1 https://github.com/georgekhananaev/google-reviews-scraper-pro.git engine
+          pip install -r engine/requirements.txt
+
+      - name: Run monitor scan
+        working-directory: scraper-worker
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_CONTACT_EMAIL: ${{ secrets.VAPID_CONTACT_EMAIL }}
+          SCRAPER_ENGINE_DIR: ${{ github.workspace }}/engine
+        run: python monitor.py
