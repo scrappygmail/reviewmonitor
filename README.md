@@ -1,53 +1,144 @@
+## `README.md`
+
+```markdown
 # Review Watch
 
-**Automated Google Maps reputation monitoring — surfaces new 1–3★ reviews across dozens of business listings and pushes an alert before they become a problem.**
+**Automated Google Maps review monitoring — track any set of business listings, get notified the moment a new 1–3★ review lands, before it does damage to a reputation.**
 
-Built for local service businesses and agencies that need to know about a negative review within hours, not whenever someone happens to check manually.
+Review Watch is a free, self-hostable tool for monitoring Google Business Profile reviews across multiple locations. Instead of manually checking dozens of listings, it scans on a schedule, detects newly published reviews, filters out anything negative, and pushes an instant browser notification — all on infrastructure that costs nothing to run.
+
+## Who this is for
+
+Anyone who needs to track Google Maps reviews across multiple business listings without paying for a SaaS subscription: local service businesses, small agencies, freelancers managing several client profiles, or anyone just wanting Google review alerts for their own listing. Deploy your own copy — your data, your infrastructure, zero recurring cost.
 
 ## Features
 
-- Keyword + location discovery for Google Maps businesses
-- Incremental review monitoring — new reviews are diffed against history, nothing is re-processed
-- Negative-review filtering (1–3★ only) with instant push alerts
-- Rotating full-sweep scanning across every discovered business, not just the active watch list
-- Native browser/PWA push notifications, including alerts when a scan run itself fails
-- Automatic 90-day data retention
-- Zero-login, single-tenant dashboard — built for a focused operator workflow, not generic multi-account SaaS
+-  Discover Google Maps businesses by keyword + location
+-  Incremental review monitoring — new reviews are diffed against history, nothing is ever re-processed
+-  Instant alerts for new **1–3★ reviews only**
+-  Scheduled monitoring plus a rotating full-database sweep, so nothing goes unchecked indefinitely
+-  Native browser/PWA push notifications — including alerts if a scan itself fails
+-  Automatic 90-day data retention
+-  Runs entirely on free-tier infrastructure — no server to maintain, no subscription
 
 ## Tech stack
 
-**Frontend:** Next.js (static export), TypeScript, Tailwind, deployed on Cloudflare Pages
-**Backend:** Python, orchestrated through scheduled/on-demand GitHub Actions — no server to maintain
-**Edge functions:** Cloudflare Pages Functions (handles the write-side API without a Node.js runtime)
-**Data:** Supabase (Postgres), with row-level security restricting the public client key to read-only
-**Notifications:** Web Push (VAPID) — no third-party notification service
-**Scraping:** Headless browser automation with anti-detection handling; discovery runs in a containerized engine
+| Layer | Tech |
+|---|---|
+| Frontend | Next.js (static export), TypeScript, Tailwind CSS |
+| Hosting | Cloudflare Pages |
+| API layer | Cloudflare Pages Functions |
+| Scheduled jobs | GitHub Actions |
+| Database | Supabase (Postgres), row-level security enforced |
+| Notifications | Web Push (VAPID) |
+| Scraping | Headless browser automation with anti-detection handling |
 
 ## How it works
 
 ```
-Discover (on-demand)      →  businesses table  →  user selects which to watch
+Discover (on-demand)      →  businesses table  →  choose which to watch
                                                           ↓
 Scheduled scan (6h)       →  new reviews diffed →  1-3★ ones trigger a push alert
-Rotation sweep (2x/day)   →  covers the full discovered list over time, oldest-scanned first
+Rotation sweep (2x/day)   →  covers the full discovered list over time
 Daily cleanup             →  reviews older than 90 days purged
 ```
 
-Every run — successful or failed — is logged with type, count, and status, so failures surface in the dashboard rather than only in CI logs.
+Every run — successful or failed — is logged, so failures show up in the dashboard instead of only in CI output.
 
 ## Engineering notes
 
 A few constraints shaped the design:
 
-- **Zero ongoing infrastructure cost.** Everything runs on free tiers (Cloudflare Pages, Supabase, GitHub Actions, Web Push), which ruled out a persistent server or paid scraping APIs — the scan/notification pipeline is entirely event- and schedule-driven.
-- **Google Maps has an unofficial ~100–120 result cap per search**, so bulk discovery is done by splitting one keyword across multiple location queries rather than assuming a single search returns everything.
-- **Scanning hundreds of businesses on a fixed schedule doesn't scale linearly** — a full sweep of a large discovered list is batched and rotated (oldest-scanned-first) instead of attempting all of them every run, to stay inside both GitHub Actions' job time limit and a sane request rate against Google.
-- **No login, but not wide open.** Since there's no auth layer, the public (browser-exposed) Supabase key is restricted via row-level security to read-only — all writes go through Cloudflare Pages Functions using a server-side key that never reaches the client.
+- **Zero ongoing infrastructure cost.** Everything runs on free tiers (Cloudflare Pages, Supabase, GitHub Actions, Web Push) — no persistent server, no paid scraping API.
+- **Google Maps caps results at roughly 100–120 per search**, so bulk discovery splits one keyword across multiple location queries instead of assuming a single search returns everything.
+- **Scanning a large list on a fixed schedule doesn't scale linearly** — a full sweep is batched and rotated (oldest-scanned-first) to stay inside GitHub Actions' job time limit and a sane request rate.
+- **No login, but not wide open.** The browser-exposed Supabase key is restricted via row-level security to read-only; all writes go through Cloudflare Pages Functions using a server-side key that never reaches the client.
 
-## Setup
+## Getting started
 
-See `Review-Watch-Setup-Guide.docx` for a full step-by-step deployment walkthrough (Supabase, GitHub Actions secrets, Cloudflare Pages) — no prior DevOps experience required.
+See [`SETUP.md`](./SETUP.md) for a full step-by-step deployment guide — Supabase, GitHub Actions, Cloudflare Pages, environment variables, push notifications. No prior DevOps experience required.
 
-## Notes
+## License
 
-No business data lives in this repository — everything is stored in Supabase, provisioned separately per deployment, so the codebase itself stays reusable across clients.
+MIT — use it, fork it, deploy it for yourself or anyone else.
+```
+
+## `SETUP.md`
+
+```markdown
+# Setup Guide
+
+This walks through deploying your own copy of Review Watch from scratch. No coding required — just follow the steps in order.
+
+## Before you start
+
+- A computer with internet access
+- An email address (for creating accounts)
+- Node.js installed ([nodejs.org](https://nodejs.org), LTS version)
+
+## 1. Fork or clone this repo
+
+Fork this repository to your own GitHub account (or clone it and push to a new repo of your own).
+
+## 2. Supabase (database)
+
+1. Go to [supabase.com](https://supabase.com) → **New Project**.
+2. Set a project name and a strong database password (save it).
+3. Once created, open **SQL Editor → New query**, paste the contents of `supabase/schema.sql`, and run it.
+4. Go to **Project Settings → API** and copy: Project URL, `anon` public key, and `service_role` key.
+
+## 3. Push notification keys (VAPID)
+
+```
+npx web-push generate-vapid-keys
+```
+
+Save the Public and Private keys shown.
+
+## 4. GitHub Actions secrets
+
+In your repo: **Settings → Secrets and variables → Actions → New repository secret**. Add:
+
+| Name | Value |
+|---|---|
+| `SUPABASE_URL` | Project URL from step 2 |
+| `SUPABASE_SERVICE_ROLE_KEY` | service_role key from step 2 |
+| `VAPID_PRIVATE_KEY` | Private key from step 3 |
+| `VAPID_CONTACT_EMAIL` | Your email address |
+
+## 5. GitHub token (for the dashboard's action buttons)
+
+1. **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+2. Scope it to this repository only, with **Actions: Read and write** permission.
+3. Save the generated token — it's shown only once.
+
+## 6. Deploy to Cloudflare Pages
+
+1. [dash.cloudflare.com](https://dash.cloudflare.com) → **Workers & Pages → Create → Pages → Connect to Git**.
+2. Select your repo. Build settings:
+   - Framework preset: **Next.js (Static HTML Export)**
+   - Build command: `npm run build`
+   - Build output directory: `out`
+   - Root directory: `frontend`
+3. Add these environment variables:
+
+| Variable | Value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase Project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon key |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | VAPID Public Key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service_role key |
+| `GITHUB_OWNER` | Your GitHub username |
+| `GITHUB_REPO` | Your repo name |
+| `GITHUB_ACTIONS_TOKEN` | Token from step 5 |
+
+4. **Save and Deploy**. You'll get a live URL in a couple of minutes.
+
+## 7. Using it
+
+- **Discover tab** — search a profession + location, review results, click **+** to start watching a business.
+- **My Businesses tab** — see everything you're watching, hit **Check now** for an on-demand scan, view **Negative reviews** separately from all reviews.
+- **Enable notifications** — click once to get push alerts for new negative reviews and for failed scan runs.
+
+Automatic scanning runs on its own every 6 hours once deployed — nothing further to configure.
+```
