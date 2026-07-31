@@ -140,5 +140,5 @@ In your repo: **Settings → Secrets and variables → Actions → New repositor
 - **My Businesses tab** — see everything you're watching, hit **Check now** for an on-demand scan, view **Negative reviews** separately from all reviews.
 - **Enable notifications** — click once to get push alerts for new negative reviews and for failed scan runs.
 
-Automatic scanning runs on its own every 6 hours once deployed — nothing further to configure.
+Automatic scanning runs on its own every 6 hours once deployed — nothing further to configure..
 ```
