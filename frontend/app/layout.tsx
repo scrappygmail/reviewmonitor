@@ -1,7 +1,7 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Review Watch",
+  title: "Review Monitor",
   description: "Google Maps negative review monitor",
   manifest: "/manifest.json",
 };
