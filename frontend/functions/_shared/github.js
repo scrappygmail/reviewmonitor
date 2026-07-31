@@ -9,6 +9,7 @@ export async function triggerWorkflow(env, workflowFile, inputs) {
       headers: {
         Authorization: `Bearer ${env.GITHUB_ACTIONS_TOKEN}`,
         Accept: "application/vnd.github+json",
+        "User-Agent": "review-watch-app",
       },
       body: JSON.stringify({ ref: "main", inputs }),
     }
@@ -17,3 +18,4 @@ export async function triggerWorkflow(env, workflowFile, inputs) {
     throw new Error(`Failed to trigger ${workflowFile}: ${res.status} ${await res.text()}`);
   }
 }
+ 
