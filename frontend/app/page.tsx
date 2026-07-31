@@ -57,9 +57,12 @@ function Header() {
           <div className="w-8 h-8 rounded-lg bg-brand-500 flex items-center justify-center text-white font-display font-bold text-sm">
             R
           </div>
-          <span className="font-display font-bold text-lg tracking-tight">Review Watch</span>
+          <span className="font-display font-bold text-lg tracking-tight">Review Monitor</span>
         </div>
-        <EnableNotificationsButton />
+        <div className="flex items-center gap-4">
+          <EnableNotificationsButton />
+          <span className="text-xs text-muted font-medium tracking-wide">JafriLabs</span>
+        </div>
       </div>
     </header>
   );
@@ -261,7 +264,8 @@ function MyBusinessesTab() {
   const [reviews, setReviews] = useState<Review[]>([]);
   const [checking, setChecking] = useState(false);
   const [lastChecked, setLastChecked] = useState<string | null>(null);
-  const [view, setView] = useState<"negative" | "all">("negative");
+  const [view, setView] = useState<"negative" | "all" | "businesses">("negative");
+  const [removingId, setRemovingId] = useState<string | null>(null);
 
   useEffect(() => {
     load();
@@ -295,6 +299,16 @@ function MyBusinessesTab() {
     setChecking(false);
   }
 
+  async function removeBusiness(id: string) {
+    setRemovingId(id);
+    await fetch("/api/businesses/delete", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    });
+    setBusinesses((b) => b.filter((biz) => biz.id !== id));
+    setRemovingId(null);
+  }
+
   const businessName = (id: string) => businesses.find((b) => b.id === id)?.name ?? "Unknown";
   const shown = view === "negative" ? reviews.filter((r) => r.is_negative) : reviews;
 
@@ -324,9 +338,40 @@ function MyBusinessesTab() {
         <TabButton active={view === "all"} onClick={() => setView("all")}>
           All reviews
         </TabButton>
+        <TabButton active={view === "businesses"} onClick={() => setView("businesses")}>
+          Saved businesses
+        </TabButton>
       </div>
 
-      <div className="grid gap-3">
+      {view === "businesses" ? (
+        <div className="grid gap-3">
+          {businesses.length === 0 && (
+            <div className="text-sm text-muted py-10 text-center">No businesses saved yet.</div>
+          )}
+          {businesses.map((b) => (
+            <div
+              key={b.id}
+              className="bg-surface border border-line rounded-xl2 p-4 shadow-card flex items-center justify-between"
+            >
+              <div>
+                <div className="font-semibold text-sm">{b.name}</div>
+                <div className="text-xs text-muted mt-0.5">
+                  {b.address} {b.rating ? `· ★ ${b.rating}` : ""}
+                </div>
+              </div>
+              <button
+                onClick={() => removeBusiness(b.id)}
+                disabled={removingId === b.id}
+                className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-lg bg-alert-50 text-alert-600 border border-alert-400 hover:bg-alert-100 focus-ring disabled:opacity-50"
+                title="Remove from watch list"
+              >
+                {removingId === b.id ? "…" : "−"}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="grid gap-3">
         {shown.length === 0 && (
           <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
         )}
@@ -343,6 +388,7 @@ function MyBusinessesTab() {
           </div>
         ))}
       </div>
+      )}
     </div>
   );
 }
