@@ -1,31 +1,29 @@
 """
-Real integration with georgekhananaev/google-reviews-scraper-pro.
+Review-scanning engine, per-business (not batched).
 
-How this works (matches their documented CLI/config exactly — their
-anti-detection SeleniumBase UC-mode internals are never touched, only
-driven via config.yaml + `python start.py`, same as their README):
+Key changes from the earlier batched version:
+  - Each business is scraped and synced to Supabase ONE AT A TIME. If the
+    workflow times out or gets cancelled partway through a list of
+    businesses, everything scraped BEFORE that point is already saved -
+    nothing is lost.
+  - MongoDB sync is explicitly disabled (use_mongodb: false). The engine
+    was defaulting to attempting a MongoDB connection regardless, wasting
+    ~30s per business on a connection timeout we never needed.
+  - max_reviews + date_filter (early_stop, last 90 days) cap how much a
+    single business scrapes. We only care about recent reviews (matches
+    our own 90-day retention), not a business's entire review history -
+    scraping hundreds of old reviews on every run was the main cause of
+    multi-hour runs.
 
-  1. Write a config.yaml listing every business to scan this run
-     (scrape_mode: new_only — their own incremental engine decides
-     what's actually new).
-  2. Run `python start.py -q` as a subprocess inside the cloned
-     engine directory (cloned by the GitHub Actions workflow —
-     see .github/workflows/*.yml).
-  3. Read their own reviews.db (SQLite) afterwards and map rows back
-     to our Supabase business_id via the scraped URL.
-  4. Diff against what's already in our Supabase `reviews` table to
-     know what's genuinely new, then upsert + count negatives.
-
-SCRAPER_ENGINE_DIR must point at the cloned
-google-reviews-scraper-pro folder (the workflow clones it next to
-this script and sets that env var).
+Still true from before: this only DRIVES the engine via config.yaml +
+its own `python start.py` CLI - none of its internals are touched.
 """
 import os
 import sqlite3
 import subprocess
 import json
 import yaml
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from db import get_client
 from notify_push import notify_scan_failed
 
@@ -33,8 +31,12 @@ SCRAPER_DIR = os.environ.get("SCRAPER_ENGINE_DIR", "./google-reviews-scraper-pro
 CONFIG_PATH = os.path.join(SCRAPER_DIR, "config.yaml")
 DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 
+PER_BUSINESS_TIMEOUT_SECONDS = 8 * 60  # a single stuck business can't eat the whole job
 
-def _write_config(businesses: list[dict]):
+
+def _write_config(business: dict):
+    ninety_days_ago = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+
     config = {
         "headless": True,
         "sort_by": "newest",
@@ -42,15 +44,20 @@ def _write_config(businesses: list[dict]):
         "db_path": "reviews.db",
         "backup_to_json": False,
         "download_images": False,
+        "use_mongodb": False,
         "log_level": "INFO",
+        "max_reviews": 100,
+        "date_filter": {
+            "after": ninety_days_ago,
+            "mode": "early_stop",
+        },
         "resilience": {
             "retry_on_session_death": 1,
             "retry_backoff_base_seconds": 3,
             "rate_limit_cooldown_seconds": 60,
         },
         "businesses": [
-            {"url": b["google_maps_url"], "custom_params": {"company": b["name"]}}
-            for b in businesses
+            {"url": business["google_maps_url"], "custom_params": {"company": business["name"]}}
         ],
     }
     with open(CONFIG_PATH, "w") as f:
@@ -62,34 +69,28 @@ def _run_scraper():
         ["python", "start.py", "-q"],
         cwd=SCRAPER_DIR,
         check=True,
-        timeout=60 * 60 * 5,  # 5h safety cap - matches the Actions job timeout
+        timeout=PER_BUSINESS_TIMEOUT_SECONDS,
     )
 
 
-def _read_reviews_from_sqlite(url_to_business_id: dict) -> list[dict]:
-    """Reads every review row from the engine's own reviews.db (per its
-    documented schema: places, reviews, review_history, scrape_sessions)
-    and maps each one back to our Supabase business_id via the scraped URL."""
+def _read_reviews_from_sqlite(url: str, business_id: str) -> list[dict]:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    cur.execute("SELECT place_id, url FROM places")
-    place_to_url = {row["place_id"]: row["url"] for row in cur.fetchall()}
+    cur.execute("SELECT place_id FROM places WHERE url = ?", (url,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return []
+    place_id = row["place_id"]
 
-    cur.execute("SELECT * FROM reviews")
+    cur.execute("SELECT * FROM reviews WHERE place_id = ?", (place_id,))
     rows = cur.fetchall()
     conn.close()
 
     results = []
     for row in rows:
-        url = place_to_url.get(row["place_id"])
-        business_id = url_to_business_id.get(url)
-        if not business_id:
-            continue
-
-        # `description` is stored as a JSON object keyed by language code
-        # (per README's documented review payload) - prefer English.
         text = ""
         try:
             desc = json.loads(row["description"]) if row["description"] else {}
@@ -109,40 +110,10 @@ def _read_reviews_from_sqlite(url_to_business_id: dict) -> list[dict]:
     return results
 
 
-def scan_batch(businesses: list[dict]) -> list[dict]:
-    """Runs the scraper once for the whole batch (its own multi-business
-    mode), returns every review row found, mapped to our business_id."""
-    if not businesses:
-        return []
-    _write_config(businesses)
-    _run_scraper()
-    url_to_id = {b["google_maps_url"]: b["id"] for b in businesses}
-    return _read_reviews_from_sqlite(url_to_id)
-
-
-def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> dict:
-    """Scans a batch of businesses, syncs genuinely-new reviews into
-    Supabase, updates last_scanned_at, logs the run, returns totals."""
-    client = get_client()
-
-    try:
-        all_reviews = scan_batch(business_list)
-    except subprocess.CalledProcessError as e:
-        client.table("scrape_logs").insert({
-            "run_type": run_type, "keyword": keyword,
-            "businesses_scanned": len(business_list),
-            "status": "failed", "error_message": str(e),
-            "ran_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        try:
-            notify_scan_failed(run_type, str(e))
-        except Exception as push_err:
-            print(f"Failed to send failure push notification: {push_err}")
-        return {"scanned": len(business_list), "new_reviews": 0, "negative": 0, "errors": 1}
-
-    total_new, total_negative = 0, 0
-
-    for r in all_reviews:
+def _sync_reviews(client, reviews: list[dict]) -> tuple[int, int]:
+    """Upserts reviews into Supabase, returns (new_count, negative_count)."""
+    new_count, negative_count = 0, 0
+    for r in reviews:
         if r["rating"] is None:
             continue
 
@@ -168,13 +139,49 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
         ).execute()
 
         if is_new:
-            total_new += 1
+            new_count += 1
             if r["rating"] <= 3:
-                total_negative += 1
+                negative_count += 1
+    return new_count, negative_count
+
+
+def scan_one_business(client, business: dict) -> dict:
+    """Scrapes and syncs a single business. Raises on scrape failure so the
+    caller can log it and move on to the next business."""
+    _write_config(business)
+    _run_scraper()
+    reviews = _read_reviews_from_sqlite(business["google_maps_url"], business["id"])
+    new_count, negative_count = _sync_reviews(client, reviews)
+
+    client.table("businesses").update({
+        "last_scanned_at": datetime.now(timezone.utc).isoformat()
+    }).eq("id", business["id"]).execute()
+
+    return {"new_reviews": new_count, "negative": negative_count}
+
+
+def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> dict:
+    """Scans a list of businesses ONE AT A TIME, syncing each to Supabase
+    immediately - a timeout or crash partway through never loses already-
+    completed businesses. Logs the overall run and returns totals."""
+    client = get_client()
+    total_new, total_negative, errors = 0, 0, 0
+
+    for i, biz in enumerate(business_list, start=1):
+        print(f"--- Scanning {i}/{len(business_list)}: {biz['name']} ---")
+        try:
+            result = scan_one_business(client, biz)
+            total_new += result["new_reviews"]
+            total_negative += result["negative"]
+        except subprocess.TimeoutExpired:
+            errors += 1
+            print(f"Timed out scraping {biz['name']} - skipping, moving to next business")
+        except subprocess.CalledProcessError as e:
+            errors += 1
+            print(f"Failed scraping {biz['name']}: {e}")
 
     now = datetime.now(timezone.utc).isoformat()
-    for b in business_list:
-        client.table("businesses").update({"last_scanned_at": now}).eq("id", b["id"]).execute()
+    status = "success" if errors == 0 else ("partial" if total_new or total_negative else "failed")
 
     client.table("scrape_logs").insert({
         "run_type": run_type,
@@ -182,9 +189,15 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
         "businesses_scanned": len(business_list),
         "new_reviews_found": total_new,
         "negative_reviews_found": total_negative,
-        "status": "success",
+        "status": status,
         "ran_at": now,
     }).execute()
 
+    if status == "failed":
+        try:
+            notify_scan_failed(run_type, f"All {len(business_list)} businesses failed to scan")
+        except Exception as push_err:
+            print(f"Failed to send failure push notification: {push_err}")
+
     return {"scanned": len(business_list), "new_reviews": total_new,
-            "negative": total_negative, "errors": 0}
+            "negative": total_negative, "errors": errors}
