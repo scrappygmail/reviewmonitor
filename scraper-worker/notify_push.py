@@ -14,8 +14,11 @@ import json
 from pywebpush import webpush, WebPushException
 from db import get_client
 
-VAPID_PRIVATE_KEY = os.environ["VAPID_PRIVATE_KEY"]
-VAPID_CLAIMS = {"sub": f"mailto:{os.environ.get('VAPID_CONTACT_EMAIL', 'admin@example.com')}"}
+
+def _vapid_config():
+    private_key = os.environ["VAPID_PRIVATE_KEY"]
+    contact_email = os.environ.get("VAPID_CONTACT_EMAIL", "admin@example.com")
+    return private_key, {"sub": f"mailto:{contact_email}"}
 
 
 def _send_to_all(client, payload: dict):
@@ -24,6 +27,7 @@ def _send_to_all(client, payload: dict):
         print("No push subscriptions registered yet.")
         return
 
+    private_key, claims = _vapid_config()
     data = json.dumps(payload)
     for sub in subs:
         try:
@@ -33,8 +37,8 @@ def _send_to_all(client, payload: dict):
                     "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]},
                 },
                 data=data,
-                vapid_private_key=VAPID_PRIVATE_KEY,
-                vapid_claims=VAPID_CLAIMS.copy(),
+                vapid_private_key=private_key,
+                vapid_claims=claims.copy(),
             )
         except WebPushException as e:
             print(f"Push failed for {sub['endpoint'][:40]}...: {e}")
