@@ -1,6 +1,6 @@
 {
-  "name": "Review Watch",
-  "short_name": "ReviewWatch",
+  "name": "Review Monitor",
+  "short_name": "ReviewMonitor",
   "description": "Google Maps negative review monitor",
   "start_url": "/",
   "display": "standalone",
