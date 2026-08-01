@@ -73,12 +73,19 @@ def _run_scraper():
     )
 
 
-def _read_reviews_from_sqlite(url: str, business_id: str) -> list[dict]:
+def _read_reviews_from_sqlite(business_id: str) -> list[dict]:
+    """
+    Since we scrape exactly one business per call, the most-recently
+    inserted row in the engine's own `places` table is always the
+    business we just scraped - this avoids depending on knowing the
+    exact column name the engine uses for the source URL (which isn't
+    documented and turned out not to be literally "url").
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    cur.execute("SELECT place_id FROM places WHERE url = ?", (url,))
+    cur.execute("SELECT place_id FROM places ORDER BY rowid DESC LIMIT 1")
     row = cur.fetchone()
     if not row:
         conn.close()
@@ -150,7 +157,7 @@ def scan_one_business(client, business: dict) -> dict:
     caller can log it and move on to the next business."""
     _write_config(business)
     _run_scraper()
-    reviews = _read_reviews_from_sqlite(business["google_maps_url"], business["id"])
+    reviews = _read_reviews_from_sqlite(business["id"])
     new_count, negative_count = _sync_reviews(client, reviews)
 
     client.table("businesses").update({
@@ -201,3 +208,4 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
 
     return {"scanned": len(business_list), "new_reviews": total_new,
             "negative": total_negative, "errors": errors}
+  
