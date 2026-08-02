@@ -79,13 +79,34 @@ create table app_settings (
 
 insert into app_settings (id) values (1) on conflict do nothing;
 
+-- Single shared row tracking whatever job is currently running (discover,
+-- monitor, full_scan, profession_scan). Since this is a single-user app,
+-- only one job realistically runs at a time. The Python workers update
+-- this as they go (per business), and the dashboard polls it to show a
+-- real progress bar + elapsed time, and to know which GitHub Actions run
+-- to cancel if the user hits Stop.
+create table job_status (
+  id int primary key default 1,
+  job_type text,               -- 'discover' | 'monitor' | 'full_scan' | 'profession_scan'
+  status text default 'idle',  -- idle | running | done | failed | cancelled
+  current_index int default 0,
+  total_count int default 0,
+  current_label text,          -- e.g. business name currently being scanned
+  run_id text,                 -- GitHub Actions run id, used by the Stop button
+  started_at timestamptz,
+  updated_at timestamptz default now(),
+  constraint single_row check (id = 1)
+);
+
+insert into job_status (id) values (1) on conflict do nothing;
+
 -- 90-day retention: delete reviews older than 90 days.
 -- Call this from cleanup_old_reviews.py on a schedule (or pg_cron if enabled).
 create or replace function delete_old_reviews() returns void as $$
 begin
   delete from reviews where scraped_at < now() - interval '90 days';
 end;
-$$ language plpgsql;
+$$ language plpgsql security definer;
 
 -- ============================================================
 -- Row Level Security
@@ -105,6 +126,7 @@ alter table businesses enable row level security;
 alter table reviews enable row level security;
 alter table scrape_logs enable row level security;
 alter table app_settings enable row level security;
+alter table job_status enable row level security;
 -- push_subscriptions has NO read policy below - the dashboard never
 -- needs to read it client-side, so the anon key gets zero access to it.
 alter table push_subscriptions enable row level security;
@@ -113,3 +135,17 @@ create policy "anon can read businesses" on businesses for select using (true);
 create policy "anon can read reviews" on reviews for select using (true);
 create policy "anon can read scrape_logs" on scrape_logs for select using (true);
 create policy "anon can read app_settings" on app_settings for select using (true);
+create policy "anon can read job_status" on job_status for select using (true);
+
+-- RLS policies control ROW-level access, but Postgres still requires a
+-- base table-level GRANT for any role to touch a table at all - this
+-- applies to "anon" (the browser) just as much as "service_role"
+-- (the scraper/Functions). Without these grants, both sides fail with
+-- "permission denied for table X" even though RLS is configured
+-- correctly.
+grant usage on schema public to anon, authenticated, service_role;
+grant select on businesses, reviews, scrape_logs, app_settings, job_status to anon, authenticated;
+grant all privileges on all tables in schema public to service_role;
+grant all privileges on all sequences in schema public to service_role;
+alter default privileges in schema public grant select on tables to anon, authenticated;
+alter default privileges in schema public grant all on tables to service_role;
