@@ -22,6 +22,7 @@ import tempfile
 from datetime import datetime, timezone
 from db import get_client
 from notify_push import notify_scan_failed
+from job_status import start_job, update_progress, finish_job
 
 COLUMN_ALIASES = {
     "name": ["title", "name"],
@@ -131,12 +132,26 @@ def main():
     args = parser.parse_args()
 
     try:
+        start_job("discover", total_count=0)
+        update_progress(0, f"Searching '{args.keyword}' in '{args.city}'…")
+    except Exception as e:
+        print(f"Failed to start job status tracking: {e}")
+
+    try:
         results = run_gosom_search(args.keyword, args.city)
         count = save_results(args.keyword, args.city, results)
         log_run(args.keyword, count)
         print(f"Discovery done: {count} businesses saved for '{args.keyword}' in '{args.city}'")
+        try:
+            finish_job("done")
+        except Exception as e:
+            print(f"Failed to finish job status tracking: {e}")
     except Exception as e:
         log_run(args.keyword, 0, status="failed", error=str(e))
+        try:
+            finish_job("failed")
+        except Exception as job_err:
+            print(f"Failed to finish job status tracking: {job_err}")
         try:
             notify_scan_failed("discover", str(e))
         except Exception as push_err:
