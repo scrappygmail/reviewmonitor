@@ -26,6 +26,7 @@ import yaml
 from datetime import datetime, timezone, timedelta
 from db import get_client
 from notify_push import notify_scan_failed
+from job_status import start_job, update_progress, finish_job
 
 SCRAPER_DIR = os.environ.get("SCRAPER_ENGINE_DIR", "./google-reviews-scraper-pro")
 CONFIG_PATH = os.path.join(SCRAPER_DIR, "config.yaml")
@@ -100,10 +101,10 @@ def _read_reviews_from_sqlite(business_id: str) -> list[dict]:
     for row in rows:
         text = ""
         try:
-            review_text = json.loads(row["review_text"]) if row["review_text"] else {}
-            text = review_text.get("en") or next(iter(review_text.values()), "")
+            desc = json.loads(row["description"]) if row["description"] else {}
+            text = desc.get("en") or next(iter(desc.values()), "")
         except Exception:
-             text = row["review_text"] or ""
+            text = row["description"] or ""
 
         rating = row["rating"]
         results.append({
@@ -174,8 +175,17 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
     client = get_client()
     total_new, total_negative, errors = 0, 0, 0
 
+    try:
+        start_job(run_type, total_count=len(business_list))
+    except Exception as e:
+        print(f"Failed to start job status tracking: {e}")
+
     for i, biz in enumerate(business_list, start=1):
         print(f"--- Scanning {i}/{len(business_list)}: {biz['name']} ---")
+        try:
+            update_progress(i, biz["name"])
+        except Exception as e:
+            print(f"Failed to update job status: {e}")
         try:
             result = scan_one_business(client, biz)
             total_new += result["new_reviews"]
@@ -200,6 +210,11 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
         "ran_at": now,
     }).execute()
 
+    try:
+        finish_job("failed" if status == "failed" else "done")
+    except Exception as e:
+        print(f"Failed to finish job status tracking: {e}")
+
     if status == "failed":
         try:
             notify_scan_failed(run_type, f"All {len(business_list)} businesses failed to scan")
@@ -208,4 +223,3 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
 
     return {"scanned": len(business_list), "new_reviews": total_new,
             "negative": total_negative, "errors": errors}
-  
