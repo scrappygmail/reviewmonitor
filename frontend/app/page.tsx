@@ -25,6 +25,15 @@ type Review = {
   is_negative: boolean;
 };
 
+type ScrapeLog = {
+  id: string;
+  run_type: string;
+  new_reviews_found: number;
+  negative_reviews_found: number;
+  status: string;
+  ran_at: string;
+};
+
 type JobStatus = {
   job_type: string | null;
   status: "idle" | "running" | "done" | "failed" | "cancelled";
@@ -84,6 +93,27 @@ function Header() {
       </div>
     </header>
   );
+}
+
+function timeAgo(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diffMs / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function runTypeLabel(runType: string): string {
+  const labels: Record<string, string> = {
+    monitor: "Watch list scan",
+    full_scan: "Full rotation sweep",
+    profession_scan: "Profession scan",
+    discover: "Discovery search",
+  };
+  return labels[runType] ?? runType;
 }
 
 function TabButton({
@@ -370,11 +400,13 @@ function DiscoverTab({ refreshKey }: { refreshKey: number }) {
 
 function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
   const [businesses, setBusinesses] = useState<Business[]>([]);
+  const [businessLookup, setBusinessLookup] = useState<Record<string, Business>>({});
   const [reviews, setReviews] = useState<Review[]>([]);
   const [checking, setChecking] = useState(false);
   const [lastChecked, setLastChecked] = useState<string | null>(null);
   const [view, setView] = useState<"negative" | "all" | "businesses">("negative");
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [activity, setActivity] = useState<ScrapeLog[]>([]);
 
   useEffect(() => {
     load();
@@ -384,6 +416,16 @@ function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
   async function load() {
     const { data: biz } = await supabase.from("businesses").select("*").eq("monitored", true);
     setBusinesses((biz ?? []) as Business[]);
+
+    // Reviews can belong to ANY discovered business, not just monitored
+    // ones (e.g. from "Scan all reviews for negatives") - so the name/link
+    // lookup needs every business, not just the watch list.
+    const { data: allBiz } = await supabase.from("businesses").select("*");
+    const lookup: Record<string, Business> = {};
+    (allBiz ?? []).forEach((b) => {
+      lookup[(b as Business).id] = b as Business;
+    });
+    setBusinessLookup(lookup);
 
     const { data: rev } = await supabase
       .from("reviews")
@@ -400,6 +442,13 @@ function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
       .limit(1)
       .maybeSingle();
     setLastChecked(log?.ran_at ?? null);
+
+    const { data: logs } = await supabase
+      .from("scrape_logs")
+      .select("*")
+      .order("ran_at", { ascending: false })
+      .limit(8);
+    setActivity((logs ?? []) as ScrapeLog[]);
   }
 
   async function checkNow() {
@@ -418,7 +467,6 @@ function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
     setRemovingId(null);
   }
 
-  const businessName = (id: string) => businesses.find((b) => b.id === id)?.name ?? "Unknown";
   const shown = view === "negative" ? reviews.filter((r) => r.is_negative) : reviews;
 
   return (
@@ -439,6 +487,39 @@ function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
           {checking ? "Starting…" : "Check now"}
         </button>
       </div>
+
+      {activity.length > 0 && (
+        <div className="bg-surface border border-line rounded-xl2 p-5 shadow-card">
+          <h3 className="text-sm font-semibold text-muted mb-3">Recent activity</h3>
+          <div className="space-y-2">
+            {activity.map((log) => (
+              <div key={log.id} className="flex items-center justify-between text-sm py-1.5 border-b border-line last:border-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      log.status === "failed" ? "bg-alert-500" : "bg-brand-500"
+                    }`}
+                  />
+                  <span className="truncate">{runTypeLabel(log.run_type)}</span>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-muted whitespace-nowrap">
+                  {log.status === "failed" ? (
+                    <span className="text-alert-600 font-medium">failed</span>
+                  ) : (
+                    <span>
+                      {log.new_reviews_found} new
+                      {log.negative_reviews_found > 0 && (
+                        <span className="text-alert-600 font-medium"> · {log.negative_reviews_found} negative</span>
+                      )}
+                    </span>
+                  )}
+                  <span>{timeAgo(log.ran_at)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="inline-flex bg-surface border border-line rounded-xl2 p-1 shadow-card">
         <TabButton active={view === "negative"} onClick={() => setView("negative")}>
@@ -484,18 +565,33 @@ function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
           {shown.length === 0 && (
             <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
           )}
-          {shown.map((r) => (
-            <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-semibold text-sm">{businessName(r.business_id)}</span>
-                <RatingBadge rating={r.rating} />
+          {shown.map((r) => {
+            const biz = businessLookup[r.business_id];
+            return (
+              <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
+                <div className="flex items-center justify-between mb-1">
+                  {biz ? (
+                    <a
+                      href={biz.google_maps_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-sm text-brand-600 hover:underline"
+                    >
+                      {biz.name}
+                    </a>
+                  ) : (
+                    <span className="font-semibold text-sm text-muted">Unknown business</span>
+                  )}
+                  <RatingBadge rating={r.rating} />
+                </div>
+                {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
+                <p className="text-sm text-muted">{r.review_text}</p>
+                <div className="text-xs text-muted mt-2">
+                  {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
+                </div>
               </div>
-              <p className="text-sm text-muted">{r.review_text}</p>
-              <div className="text-xs text-muted mt-2">
-                {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
