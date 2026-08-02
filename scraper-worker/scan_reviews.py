@@ -101,10 +101,10 @@ def _read_reviews_from_sqlite(business_id: str) -> list[dict]:
     for row in rows:
         text = ""
         try:
-            desc = json.loads(row["description"]) if row["description"] else {}
+            desc = json.loads(row["review_text"]) if row["review_text"] else {}
             text = desc.get("en") or next(iter(desc.values()), "")
         except Exception:
-            text = row["description"] or ""
+            text = row["review_text"] or ""
 
         rating = row["rating"]
         results.append({
