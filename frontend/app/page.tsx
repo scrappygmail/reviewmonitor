@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 type Business = {
@@ -25,8 +25,18 @@ type Review = {
   is_negative: boolean;
 };
 
+type JobStatus = {
+  job_type: string | null;
+  status: "idle" | "running" | "done" | "failed" | "cancelled";
+  current_index: number;
+  total_count: number;
+  current_label: string | null;
+  started_at: string | null;
+};
+
 export default function Dashboard() {
   const [tab, setTab] = useState<"discover" | "mine">("mine");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   return (
     <main className="min-h-screen">
@@ -41,8 +51,16 @@ export default function Dashboard() {
           </TabButton>
         </div>
 
+        <div className="mt-4">
+          <JobStatusBanner onFinished={() => setRefreshKey((k) => k + 1)} />
+        </div>
+
         <div className="mt-6 pb-16">
-          {tab === "discover" ? <DiscoverTab /> : <MyBusinessesTab />}
+          {tab === "discover" ? (
+            <DiscoverTab refreshKey={refreshKey} />
+          ) : (
+            <MyBusinessesTab refreshKey={refreshKey} />
+          )}
         </div>
       </div>
     </main>
@@ -90,21 +108,121 @@ function TabButton({
 }
 
 // ---------------------------------------------------------------------------
+// Live job progress banner - polls job_status, shows elapsed time + a real
+// progress bar (when the job knows its total), and a Stop button. Calls
+// onFinished() the moment a running job transitions to done/failed/cancelled
+// so the tabs can refresh their data automatically.
+// ---------------------------------------------------------------------------
+
+function JobStatusBanner({ onFinished }: { onFinished: () => void }) {
+  const [job, setJob] = useState<JobStatus | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [stopping, setStopping] = useState(false);
+  const prevStatus = useRef<string | null>(null);
+
+  useEffect(() => {
+    async function poll() {
+      const { data } = await supabase.from("job_status").select("*").eq("id", 1).maybeSingle();
+      if (data) {
+        const j = data as JobStatus;
+        if (prevStatus.current === "running" && j.status !== "running") {
+          onFinished();
+        }
+        prevStatus.current = j.status;
+        setJob(j);
+      }
+    }
+    poll();
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!job || job.status !== "running" || !job.started_at) return;
+    const startedMs = new Date(job.started_at).getTime();
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)));
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [job?.started_at, job?.status]);
+
+  async function stop() {
+    setStopping(true);
+    await fetch("/api/cancel", { method: "POST" });
+    setStopping(false);
+  }
+
+  if (!job || job.status !== "running") return null;
+
+  const pct = job.total_count > 0 ? Math.round((job.current_index / job.total_count) * 100) : null;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const label = job.job_type === "discover" ? "Searching…" : "Scanning reviews…";
+
+  return (
+    <div className="bg-brand-50 border border-brand-400 rounded-xl2 p-4 shadow-card flex items-center gap-4">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-sm font-semibold text-brand-600">{label}</span>
+          <span className="text-xs text-muted whitespace-nowrap">
+            {mins}:{secs.toString().padStart(2, "0")} elapsed
+          </span>
+        </div>
+        {job.current_label && (
+          <div className="text-xs text-muted mb-2 truncate">{job.current_label}</div>
+        )}
+        <div className="w-full h-2 bg-brand-100 rounded-full overflow-hidden">
+          {pct !== null ? (
+            <div
+              className="h-full bg-brand-500 transition-all duration-500"
+              style={{ width: `${pct}%` }}
+            />
+          ) : (
+            <div className="h-full bg-brand-500 animate-pulse w-1/3 rounded-full" />
+          )}
+        </div>
+        {job.total_count > 0 && (
+          <div className="text-xs text-muted mt-1">
+            {job.current_index} / {job.total_count}
+          </div>
+        )}
+      </div>
+      <button
+        onClick={stop}
+        disabled={stopping}
+        className="text-sm font-semibold text-alert-600 border border-alert-400 rounded-lg px-3 py-1.5 hover:bg-alert-50 focus-ring disabled:opacity-50 whitespace-nowrap"
+      >
+        {stopping ? "Stopping…" : "Stop"}
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Discover tab
 // ---------------------------------------------------------------------------
 
-function DiscoverTab() {
+function DiscoverTab({ refreshKey }: { refreshKey: number }) {
   const [keyword, setKeyword] = useState("");
   const [city, setCity] = useState("");
   const [savedKeywords, setSavedKeywords] = useState<string[]>([]);
   const [activeKeyword, setActiveKeyword] = useState<string | null>(null);
   const [results, setResults] = useState<Business[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [scanStarting, setScanStarting] = useState(false);
 
   useEffect(() => {
     loadSavedKeywords();
   }, []);
+
+  // Whenever a job finishes (banner tells the parent, which bumps
+  // refreshKey), reload whichever keyword's results are on screen.
+  useEffect(() => {
+    loadSavedKeywords();
+    if (activeKeyword) loadKeywordList(activeKeyword);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   async function loadSavedKeywords() {
     const { data } = await supabase.from("businesses").select("keyword");
@@ -114,26 +232,17 @@ function DiscoverTab() {
 
   async function runDiscovery() {
     if (!keyword || !city) return;
-    setLoading(true);
+    setStarting(true);
     await fetch("/api/discover", {
       method: "POST",
       body: JSON.stringify({ keyword, city }),
     });
-    // Discovery runs as a background GitHub Action — poll for results.
-    await pollForResults(keyword);
-    setLoading(false);
-  }
-
-  async function pollForResults(kw: string) {
-    for (let i = 0; i < 20; i++) {
-      await new Promise((r) => setTimeout(r, 15000));
-      const { data } = await supabase.from("businesses").select("*").eq("keyword", kw);
-      if (data && data.length > 0) {
-        setResults(data as Business[]);
-        loadSavedKeywords();
-        return;
-      }
-    }
+    // Optimistically switch to this keyword's results view - the
+    // JobStatusBanner above will show live progress, and results appear
+    // here automatically once the job finishes (via refreshKey).
+    setActiveKeyword(keyword);
+    setResults([]);
+    setStarting(false);
   }
 
   async function loadKeywordList(kw: string) {
@@ -151,12 +260,12 @@ function DiscoverTab() {
   }
 
   async function runProfessionScan(kw: string) {
-    setScanning(true);
+    setScanStarting(true);
     await fetch("/api/profession-scan", {
       method: "POST",
       body: JSON.stringify({ keyword: kw }),
     });
-    setScanning(false);
+    setScanStarting(false);
   }
 
   return (
@@ -181,10 +290,10 @@ function DiscoverTab() {
           />
           <button
             onClick={runDiscovery}
-            disabled={loading}
+            disabled={starting}
             className="bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm rounded-lg px-5 py-2.5 focus-ring disabled:opacity-50"
           >
-            {loading ? "Searching…" : "Search"}
+            {starting ? "Starting…" : "Search"}
           </button>
         </div>
       </div>
@@ -217,10 +326,10 @@ function DiscoverTab() {
           </span>
           <button
             onClick={() => runProfessionScan(activeKeyword)}
-            disabled={scanning}
+            disabled={scanStarting}
             className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring disabled:opacity-50"
           >
-            {scanning ? "Scanning reviews…" : "Scan all reviews for negatives →"}
+            {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
           </button>
         </div>
       )}
@@ -259,7 +368,7 @@ function DiscoverTab() {
 // My Businesses tab
 // ---------------------------------------------------------------------------
 
-function MyBusinessesTab() {
+function MyBusinessesTab({ refreshKey }: { refreshKey: number }) {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [checking, setChecking] = useState(false);
@@ -269,7 +378,8 @@ function MyBusinessesTab() {
 
   useEffect(() => {
     load();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey]);
 
   async function load() {
     const { data: biz } = await supabase.from("businesses").select("*").eq("monitored", true);
@@ -295,7 +405,6 @@ function MyBusinessesTab() {
   async function checkNow() {
     setChecking(true);
     await fetch("/api/check-now", { method: "POST" });
-    await load();
     setChecking(false);
   }
 
@@ -327,7 +436,7 @@ function MyBusinessesTab() {
           disabled={checking}
           className="bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm rounded-lg px-5 py-2.5 focus-ring disabled:opacity-50 whitespace-nowrap"
         >
-          {checking ? "Checking…" : "Check now"}
+          {checking ? "Starting…" : "Check now"}
         </button>
       </div>
 
@@ -372,22 +481,22 @@ function MyBusinessesTab() {
         </div>
       ) : (
         <div className="grid gap-3">
-        {shown.length === 0 && (
-          <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
-        )}
-        {shown.map((r) => (
-          <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
-            <div className="flex items-center justify-between mb-1">
-              <span className="font-semibold text-sm">{businessName(r.business_id)}</span>
-              <RatingBadge rating={r.rating} />
+          {shown.length === 0 && (
+            <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
+          )}
+          {shown.map((r) => (
+            <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
+              <div className="flex items-center justify-between mb-1">
+                <span className="font-semibold text-sm">{businessName(r.business_id)}</span>
+                <RatingBadge rating={r.rating} />
+              </div>
+              <p className="text-sm text-muted">{r.review_text}</p>
+              <div className="text-xs text-muted mt-2">
+                {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
+              </div>
             </div>
-            <p className="text-sm text-muted">{r.review_text}</p>
-            <div className="text-xs text-muted mt-2">
-              {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
-            </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
       )}
     </div>
   );
