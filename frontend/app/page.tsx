@@ -206,6 +206,34 @@ function JobStatusBanner({
     return () => clearInterval(t);
   }, [job?.started_at, job?.status]);
 
+  // Every 15s while we think we're running, ask GitHub directly whether
+  // the run is actually still going. This is what stops the timer/progress
+  // bar from running forever if the workflow died without ever updating
+  // its own status (crash, orphaned process, etc).
+  useEffect(() => {
+    if (job?.status !== "running") return;
+
+    async function reconcile() {
+      try {
+        const res = await fetch("/api/job-check", { method: "POST" });
+        if (res.ok) {
+          const j = (await res.json()) as JobStatus;
+          if (prevStatus.current === "running" && j.status !== "running") {
+            onFinished();
+          }
+          prevStatus.current = j.status;
+          setJob(j);
+        }
+      } catch (e) {
+        console.error("Failed to reconcile job status with GitHub:", e);
+      }
+    }
+
+    const interval = setInterval(reconcile, 15000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status]);
+
   async function stop() {
     setStopping(true);
     await fetch("/api/cancel", { method: "POST" });
