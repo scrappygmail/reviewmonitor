@@ -23,11 +23,13 @@ type Review = {
   review_text: string | null;
   review_date: string | null;
   is_negative: boolean;
+  scan_id: string | null;
 };
 
 type ScrapeLog = {
   id: string;
   run_type: string;
+  keyword: string | null;
   new_reviews_found: number;
   negative_reviews_found: number;
   status: string;
@@ -47,6 +49,7 @@ export default function Dashboard() {
   const [tab, setTab] = useState<"discover" | "mine">("mine");
   const [refreshKey, setRefreshKey] = useState(0);
   const [localStarting, setLocalStarting] = useState(false);
+  const [pendingKeyword, setPendingKeyword] = useState<string | null>(null);
 
   return (
     <main className="min-h-screen">
@@ -74,9 +77,21 @@ export default function Dashboard() {
 
         <div className="mt-6 pb-16">
           {tab === "discover" ? (
-            <DiscoverTab refreshKey={refreshKey} onStart={() => setLocalStarting(true)} />
+            <DiscoverTab
+              refreshKey={refreshKey}
+              onStart={() => setLocalStarting(true)}
+              pendingKeyword={pendingKeyword}
+              onPendingKeywordHandled={() => setPendingKeyword(null)}
+            />
           ) : (
-            <MyBusinessesTab refreshKey={refreshKey} onStart={() => setLocalStarting(true)} />
+            <MyBusinessesTab
+              refreshKey={refreshKey}
+              onStart={() => setLocalStarting(true)}
+              onOpenDiscoverKeyword={(kw) => {
+                setPendingKeyword(kw);
+                setTab("discover");
+              }}
+            />
           )}
         </div>
       </div>
@@ -311,7 +326,17 @@ function JobStatusBanner({
 // Discover tab
 // ---------------------------------------------------------------------------
 
-function DiscoverTab({ refreshKey, onStart }: { refreshKey: number; onStart: () => void }) {
+function DiscoverTab({
+  refreshKey,
+  onStart,
+  pendingKeyword,
+  onPendingKeywordHandled,
+}: {
+  refreshKey: number;
+  onStart: () => void;
+  pendingKeyword: string | null;
+  onPendingKeywordHandled: () => void;
+}) {
   const [keyword, setKeyword] = useState("");
   const [city, setCity] = useState("");
   const [savedKeywords, setSavedKeywords] = useState<string[]>([]);
@@ -333,6 +358,16 @@ function DiscoverTab({ refreshKey, onStart }: { refreshKey: number; onStart: () 
     setSearching(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
+
+  // Arriving here from a "Recent activity" click on My Businesses -
+  // jump straight to that keyword's results.
+  useEffect(() => {
+    if (pendingKeyword) {
+      loadKeywordList(pendingKeyword);
+      onPendingKeywordHandled();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKeyword]);
 
   async function loadSavedKeywords() {
     const { data } = await supabase.from("businesses").select("keyword");
@@ -489,7 +524,15 @@ function DiscoverTab({ refreshKey, onStart }: { refreshKey: number; onStart: () 
 // My Businesses tab
 // ---------------------------------------------------------------------------
 
-function MyBusinessesTab({ refreshKey, onStart }: { refreshKey: number; onStart: () => void }) {
+function MyBusinessesTab({
+  refreshKey,
+  onStart,
+  onOpenDiscoverKeyword,
+}: {
+  refreshKey: number;
+  onStart: () => void;
+  onOpenDiscoverKeyword: (keyword: string) => void;
+}) {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessLookup, setBusinessLookup] = useState<Record<string, Business>>({});
   const [reviews, setReviews] = useState<Review[]>([]);
@@ -498,6 +541,12 @@ function MyBusinessesTab({ refreshKey, onStart }: { refreshKey: number; onStart:
   const [view, setView] = useState<"negative" | "all" | "businesses">("negative");
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [activity, setActivity] = useState<ScrapeLog[]>([]);
+
+  // Session view: when set, shows only the reviews found by that one
+  // specific scan run instead of everything mixed together.
+  const [sessionLog, setSessionLog] = useState<ScrapeLog | null>(null);
+  const [sessionReviews, setSessionReviews] = useState<Review[]>([]);
+  const [sessionLoading, setSessionLoading] = useState(false);
 
   useEffect(() => {
     load();
@@ -559,7 +608,52 @@ function MyBusinessesTab({ refreshKey, onStart }: { refreshKey: number; onStart:
     setRemovingId(null);
   }
 
+  async function openActivity(log: ScrapeLog) {
+    if (log.run_type === "discover") {
+      onOpenDiscoverKeyword(log.keyword ?? "");
+      return;
+    }
+    setSessionLog(log);
+    setSessionLoading(true);
+    const { data } = await supabase.from("reviews").select("*").eq("scan_id", log.id);
+    setSessionReviews((data ?? []) as Review[]);
+    setSessionLoading(false);
+  }
+
+  function closeSession() {
+    setSessionLog(null);
+    setSessionReviews([]);
+  }
+
   const shown = view === "negative" ? reviews.filter((r) => r.is_negative) : reviews;
+
+  function reviewCard(r: Review) {
+    const biz = businessLookup[r.business_id];
+    return (
+      <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
+        <div className="flex items-center justify-between mb-1">
+          {biz ? (
+            <a
+              href={biz.google_maps_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-sm text-brand-600 hover:underline"
+            >
+              {biz.name}
+            </a>
+          ) : (
+            <span className="font-semibold text-sm text-muted">Unknown business</span>
+          )}
+          <RatingBadge rating={r.rating} />
+        </div>
+        {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
+        <p className="text-sm text-muted">{r.review_text}</p>
+        <div className="text-xs text-muted mt-2">
+          {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -583,19 +677,29 @@ function MyBusinessesTab({ refreshKey, onStart }: { refreshKey: number; onStart:
       {activity.length > 0 && (
         <div className="bg-surface border border-line rounded-xl2 p-5 shadow-card">
           <h3 className="text-sm font-semibold text-muted mb-3">Recent activity</h3>
-          <div className="space-y-2">
+          <p className="text-xs text-muted mb-3">Click any run to see exactly what it found.</p>
+          <div className="space-y-1">
             {activity.map((log) => (
-              <div key={log.id} className="flex items-center justify-between text-sm py-1.5 border-b border-line last:border-0">
+              <button
+                key={log.id}
+                onClick={() => openActivity(log)}
+                className="w-full flex items-center justify-between text-sm py-2 px-2 -mx-2 rounded-lg border-b border-line last:border-0 hover:bg-brand-50 focus-ring text-left"
+              >
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       log.status === "failed" ? "bg-alert-500" : "bg-brand-500"
                     }`}
                   />
-                  <span className="truncate">{runTypeLabel(log.run_type)}</span>
+                  <span className="truncate">
+                    {runTypeLabel(log.run_type)}
+                    {log.keyword ? ` · ${log.keyword}` : ""}
+                  </span>
                 </div>
                 <div className="flex items-center gap-3 text-xs text-muted whitespace-nowrap">
-                  {log.status === "failed" ? (
+                  {log.status === "running" ? (
+                    <span className="text-brand-600 font-medium">in progress…</span>
+                  ) : log.status === "failed" ? (
                     <span className="text-alert-600 font-medium">failed</span>
                   ) : (
                     <span>
@@ -607,84 +711,92 @@ function MyBusinessesTab({ refreshKey, onStart }: { refreshKey: number; onStart:
                   )}
                   <span>{timeAgo(log.ran_at)}</span>
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         </div>
       )}
 
-      <div className="inline-flex bg-surface border border-line rounded-xl2 p-1 shadow-card">
-        <TabButton active={view === "negative"} onClick={() => setView("negative")}>
-          Negative reviews
-        </TabButton>
-        <TabButton active={view === "all"} onClick={() => setView("all")}>
-          All reviews
-        </TabButton>
-        <TabButton active={view === "businesses"} onClick={() => setView("businesses")}>
-          Saved businesses
-        </TabButton>
-      </div>
-
-      {view === "businesses" ? (
-        <div className="grid gap-3">
-          {businesses.length === 0 && (
-            <div className="text-sm text-muted py-10 text-center">No businesses saved yet.</div>
-          )}
-          {businesses.map((b) => (
-            <div
-              key={b.id}
-              className="bg-surface border border-line rounded-xl2 p-4 shadow-card flex items-center justify-between"
-            >
-              <div>
-                <div className="font-semibold text-sm">{b.name}</div>
-                <div className="text-xs text-muted mt-0.5">
-                  {b.address} {b.rating ? `· ★ ${b.rating}` : ""}
-                </div>
+      {sessionLog ? (
+        <div className="space-y-4">
+          <div className="bg-brand-50 border border-brand-400 rounded-xl2 p-4 shadow-card flex items-center justify-between">
+            <div>
+              <div className="text-sm font-semibold text-brand-600">
+                {runTypeLabel(sessionLog.run_type)}
               </div>
-              <button
-                onClick={() => removeBusiness(b.id)}
-                disabled={removingId === b.id}
-                className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-lg bg-alert-50 text-alert-600 border border-alert-400 hover:bg-alert-100 focus-ring disabled:opacity-50"
-                title="Remove from watch list"
-              >
-                {removingId === b.id ? "…" : "−"}
-              </button>
+              <div className="text-xs text-muted">
+                {timeAgo(sessionLog.ran_at)} · {sessionReviews.length} reviews found
+              </div>
             </div>
-          ))}
+            <button
+              onClick={closeSession}
+              className="text-sm font-semibold text-muted hover:text-ink focus-ring px-3 py-1.5"
+            >
+              ✕ Back
+            </button>
+          </div>
+          <div className="grid gap-3">
+            {sessionLoading && (
+              <div className="text-sm text-muted py-10 text-center">Loading…</div>
+            )}
+            {!sessionLoading && sessionReviews.length === 0 && (
+              <div className="text-sm text-muted py-10 text-center">
+                No new reviews were found in this run.
+              </div>
+            )}
+            {!sessionLoading && sessionReviews.map(reviewCard)}
+          </div>
         </div>
       ) : (
-        <div className="grid gap-3">
-          {shown.length === 0 && (
-            <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
+        <>
+          <div className="inline-flex bg-surface border border-line rounded-xl2 p-1 shadow-card">
+            <TabButton active={view === "negative"} onClick={() => setView("negative")}>
+              Negative reviews
+            </TabButton>
+            <TabButton active={view === "all"} onClick={() => setView("all")}>
+              All reviews
+            </TabButton>
+            <TabButton active={view === "businesses"} onClick={() => setView("businesses")}>
+              Saved businesses
+            </TabButton>
+          </div>
+
+          {view === "businesses" ? (
+            <div className="grid gap-3">
+              {businesses.length === 0 && (
+                <div className="text-sm text-muted py-10 text-center">No businesses saved yet.</div>
+              )}
+              {businesses.map((b) => (
+                <div
+                  key={b.id}
+                  className="bg-surface border border-line rounded-xl2 p-4 shadow-card flex items-center justify-between"
+                >
+                  <div>
+                    <div className="font-semibold text-sm">{b.name}</div>
+                    <div className="text-xs text-muted mt-0.5">
+                      {b.address} {b.rating ? `· ★ ${b.rating}` : ""}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeBusiness(b.id)}
+                    disabled={removingId === b.id}
+                    className="w-9 h-9 rounded-full flex items-center justify-center font-bold text-lg bg-alert-50 text-alert-600 border border-alert-400 hover:bg-alert-100 focus-ring disabled:opacity-50"
+                    title="Remove from watch list"
+                  >
+                    {removingId === b.id ? "…" : "−"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid gap-3">
+              {shown.length === 0 && (
+                <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
+              )}
+              {shown.map(reviewCard)}
+            </div>
           )}
-          {shown.map((r) => {
-            const biz = businessLookup[r.business_id];
-            return (
-              <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
-                <div className="flex items-center justify-between mb-1">
-                  {biz ? (
-                    <a
-                      href={biz.google_maps_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-semibold text-sm text-brand-600 hover:underline"
-                    >
-                      {biz.name}
-                    </a>
-                  ) : (
-                    <span className="font-semibold text-sm text-muted">Unknown business</span>
-                  )}
-                  <RatingBadge rating={r.rating} />
-                </div>
-                {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
-                <p className="text-sm text-muted">{r.review_text}</p>
-                <div className="text-xs text-muted mt-2">
-                  {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        </>
       )}
     </div>
   );
