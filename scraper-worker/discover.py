@@ -65,7 +65,10 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                 "gosom/google-maps-scraper",
                 "-input", "/queries.txt",
                 "-results", "/results.csv",
-                "-depth", "1",
+                # depth = how many times it scrolls the results list to load
+                # more listings (engine default is 10; 20 gets a fuller list
+                # per keyword+city search without taking too long).
+                "-depth", "30",
                 "-exit-on-inactivity", "3m",
             ],
             check=True,
