@@ -63,10 +63,17 @@ create table scrape_logs (
   businesses_scanned int default 0,
   new_reviews_found int default 0,
   negative_reviews_found int default 0,
-  status text default 'success', -- success | failed | partial
+  status text default 'success', -- running | success | failed | partial
   error_message text,
   ran_at timestamptz default now()
 );
+
+-- Links each review back to the specific run that found it, so the
+-- dashboard can show "this session's results" grouped by scan instead of
+-- everything mixed together. Added via ALTER since scrape_logs has to
+-- exist first for the foreign key.
+alter table reviews add column scan_id uuid references scrape_logs(id) on delete set null;
+create index idx_reviews_scan_id on reviews(scan_id);
 
 -- Simple settings row (single user, single row).
 create table app_settings (
