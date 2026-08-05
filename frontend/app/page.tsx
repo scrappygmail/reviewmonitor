@@ -111,7 +111,10 @@ function Header() {
         </div>
         <div className="flex items-center gap-4">
           <EnableNotificationsButton />
-          <span className="text-xs text-muted font-medium tracking-wide">JafriLabs</span>
+          <span className="font-display font-extrabold text-base tracking-tight select-none">
+            <span style={{ color: "#DC2626" }}>J</span>
+            <span style={{ color: "#1B1464" }}>afriLabs</span>
+          </span>
         </div>
       </div>
     </header>
