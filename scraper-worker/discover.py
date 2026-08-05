@@ -66,13 +66,13 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                 "-input", "/queries.txt",
                 "-results", "/results.csv",
                 # depth = how many times it scrolls the results list to load
-                # more listings (engine default is 10; 20 gets a fuller list
+                # more listings (engine default is 10; 30 gets a fuller list
                 # per keyword+city search without taking too long).
                 "-depth", "30",
                 "-exit-on-inactivity", "3m",
             ],
             check=True,
-            timeout=60 * 20,
+            timeout=60 * 30,
         )
 
         results = []
