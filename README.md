@@ -142,3 +142,4 @@ In your repo: **Settings → Secrets and variables → Actions → New repositor
 
 Automatic scanning runs on its own every 6 hours once deployed — nothing further to configure..
 ```
+Live Link: https://reviewmonitor.pages.dev/
