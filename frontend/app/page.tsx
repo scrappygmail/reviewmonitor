@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import { supabase } from "@/lib/supabase";
 
 type Business = {
@@ -119,6 +120,12 @@ function Header() {
       </div>
     </header>
   );
+}
+
+function csvEscape(field: string): string {
+  const needsQuotes = /[",\n\r]/.test(field);
+  const escaped = field.replace(/"/g, '""');
+  return needsQuotes ? `"${escaped}"` : escaped;
 }
 
 function timeAgo(iso: string): string {
@@ -628,6 +635,73 @@ function MyBusinessesTab({
     setSessionReviews([]);
   }
 
+  // Exports the negative reviews found by ONE specific run as a CSV -
+  // positive reviews are deliberately excluded, this file is meant to be a
+  // clean lead list the client can hand off / import elsewhere.
+  const [exportingRunId, setExportingRunId] = useState<string | null>(null);
+
+  async function downloadRunCsv(log: ScrapeLog, e?: MouseEvent) {
+    e?.stopPropagation(); // don't also trigger the row's "open session" click
+    setExportingRunId(log.id);
+    try {
+      const { data } = await supabase
+        .from("reviews")
+        .select("*")
+        .eq("scan_id", log.id)
+        .eq("is_negative", true)
+        .order("review_date", { ascending: false });
+
+      const negativeReviews = (data ?? []) as Review[];
+      if (negativeReviews.length === 0) {
+        alert("This run found no negative reviews - nothing to export.");
+        return;
+      }
+
+      const header = [
+        "Business Name",
+        "Address",
+        "City",
+        "Keyword",
+        "Rating",
+        "Review Text",
+        "Author",
+        "Review Date",
+        "Google Maps Link",
+      ];
+
+      const rows = negativeReviews.map((r) => {
+        const biz = businessLookup[r.business_id];
+        return [
+          biz?.name ?? "",
+          biz?.address ?? "",
+          biz?.city ?? "",
+          biz?.keyword ?? "",
+          String(r.rating),
+          r.review_text ?? "",
+          r.author ?? "",
+          r.review_date ? new Date(r.review_date).toLocaleDateString() : "",
+          biz?.google_maps_url ?? "",
+        ];
+      });
+
+      const csv = [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n");
+      // \uFEFF BOM so Excel opens it correctly instead of mangling special characters
+      const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const dateStr = new Date(log.ran_at).toISOString().slice(0, 10);
+      const label = runTypeLabel(log.run_type).replace(/\s+/g, "-").toLowerCase();
+      a.href = url;
+      a.download = `negative-reviews_${label}_${dateStr}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } finally {
+      setExportingRunId(null);
+    }
+  }
+
   const shown = view === "negative" ? reviews.filter((r) => r.is_negative) : reviews;
 
   function reviewCard(r: Review) {
@@ -683,12 +757,14 @@ function MyBusinessesTab({
           <p className="text-xs text-muted mb-3">Click any run to see exactly what it found.</p>
           <div className="space-y-1">
             {activity.map((log) => (
-              <button
+              <div
                 key={log.id}
-                onClick={() => openActivity(log)}
-                className="w-full flex items-center justify-between text-sm py-2 px-2 -mx-2 rounded-lg border-b border-line last:border-0 hover:bg-brand-50 focus-ring text-left"
+                className="w-full flex items-center justify-between text-sm py-2 px-2 -mx-2 rounded-lg border-b border-line last:border-0 hover:bg-brand-50"
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <button
+                  onClick={() => openActivity(log)}
+                  className="flex items-center gap-2 min-w-0 flex-1 focus-ring text-left"
+                >
                   <span
                     className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       log.status === "failed" ? "bg-alert-500" : "bg-brand-500"
@@ -698,23 +774,36 @@ function MyBusinessesTab({
                     {runTypeLabel(log.run_type)}
                     {log.keyword ? ` · ${log.keyword}` : ""}
                   </span>
-                </div>
+                </button>
                 <div className="flex items-center gap-3 text-xs text-muted whitespace-nowrap">
                   {log.status === "running" ? (
                     <span className="text-brand-600 font-medium">in progress…</span>
                   ) : log.status === "failed" ? (
                     <span className="text-alert-600 font-medium">failed</span>
                   ) : (
-                    <span>
+                    <button
+                      onClick={() => openActivity(log)}
+                      className="focus-ring"
+                    >
                       {log.new_reviews_found} new
                       {log.negative_reviews_found > 0 && (
                         <span className="text-alert-600 font-medium"> · {log.negative_reviews_found} negative</span>
                       )}
-                    </span>
+                    </button>
                   )}
                   <span>{timeAgo(log.ran_at)}</span>
+                  {log.run_type !== "discover" && log.negative_reviews_found > 0 && (
+                    <button
+                      onClick={(e) => downloadRunCsv(log, e)}
+                      disabled={exportingRunId === log.id}
+                      title="Download negative reviews as CSV"
+                      className="w-7 h-7 flex-shrink-0 rounded-md flex items-center justify-center text-brand-600 hover:bg-brand-100 focus-ring disabled:opacity-50"
+                    >
+                      {exportingRunId === log.id ? "…" : "⬇"}
+                    </button>
+                  )}
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -728,15 +817,28 @@ function MyBusinessesTab({
                 {runTypeLabel(sessionLog.run_type)}
               </div>
               <div className="text-xs text-muted">
-                {timeAgo(sessionLog.ran_at)} · {sessionReviews.length} reviews found
+                {timeAgo(sessionLog.ran_at)} · {sessionReviews.length} reviews found ·{" "}
+                {sessionReviews.filter((r) => r.is_negative).length} negative
               </div>
             </div>
-            <button
-              onClick={closeSession}
-              className="text-sm font-semibold text-muted hover:text-ink focus-ring px-3 py-1.5"
-            >
-              ✕ Back
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={(e) => downloadRunCsv(sessionLog, e)}
+                disabled={
+                  exportingRunId === sessionLog.id ||
+                  sessionReviews.filter((r) => r.is_negative).length === 0
+                }
+                className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring px-3 py-1.5 disabled:opacity-40"
+              >
+                {exportingRunId === sessionLog.id ? "Exporting…" : "⬇ Download CSV"}
+              </button>
+              <button
+                onClick={closeSession}
+                className="text-sm font-semibold text-muted hover:text-ink focus-ring px-3 py-1.5"
+              >
+                ✕ Back
+              </button>
+            </div>
           </div>
           <div className="grid gap-3">
             {sessionLoading && (

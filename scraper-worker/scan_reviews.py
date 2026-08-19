@@ -13,7 +13,7 @@ Other behaviour carried over from before:
     workflow times out or gets cancelled partway through a list of
     businesses, everything scraped BEFORE that point is already saved.
   - MongoDB sync is explicitly disabled (use_mongodb: false).
-  - max_reviews + date_filter (early_stop, last 90 days) cap how much a
+  - max_reviews + date_filter (early_stop, last 28 days) cap how much a
     single business scrapes.
 
 This only DRIVES the engine via config.yaml + its own `python start.py`
@@ -36,8 +36,11 @@ DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 PER_BUSINESS_TIMEOUT_SECONDS = 8 * 60  # a single stuck business can't eat the whole job
 
 
+SCAN_WINDOW_DAYS = 28  # client wants each run to pull only the last 28 days of reviews
+
+
 def _write_config(business: dict):
-    ninety_days_ago = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    window_start = (datetime.now(timezone.utc) - timedelta(days=SCAN_WINDOW_DAYS)).strftime("%Y-%m-%d")
 
     config = {
         "headless": True,
@@ -50,7 +53,7 @@ def _write_config(business: dict):
         "log_level": "INFO",
         "max_reviews": 100,
         "date_filter": {
-            "after": ninety_days_ago,
+            "after": window_start,
             "mode": "early_stop",
         },
         "resilience": {
