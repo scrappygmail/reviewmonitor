@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Dispatch, MouseEvent, SetStateAction } from "react";
 import { supabase } from "@/lib/supabase";
 
 type Business = {
@@ -52,6 +52,15 @@ export default function Dashboard() {
   const [localStarting, setLocalStarting] = useState(false);
   const [pendingKeyword, setPendingKeyword] = useState<string | null>(null);
 
+  // Lifted out of DiscoverTab (instead of living as local state there) so
+  // the last search's results and the saved-keyword pills survive
+  // switching to "My Businesses" and back. They only reset when a new
+  // manual search runs, or when the user explicitly hits a "Clear" button.
+  const [discoverActiveKeyword, setDiscoverActiveKeyword] = useState<string | null>(null);
+  const [discoverResults, setDiscoverResults] = useState<Business[]>([]);
+  const [discoverSearching, setDiscoverSearching] = useState(false);
+  const [keywordsCleared, setKeywordsCleared] = useState(false);
+
   return (
     <main className="min-h-screen">
       <Header />
@@ -83,6 +92,14 @@ export default function Dashboard() {
               onStart={() => setLocalStarting(true)}
               pendingKeyword={pendingKeyword}
               onPendingKeywordHandled={() => setPendingKeyword(null)}
+              activeKeyword={discoverActiveKeyword}
+              setActiveKeyword={setDiscoverActiveKeyword}
+              results={discoverResults}
+              setResults={setDiscoverResults}
+              searching={discoverSearching}
+              setSearching={setDiscoverSearching}
+              keywordsCleared={keywordsCleared}
+              setKeywordsCleared={setKeywordsCleared}
             />
           ) : (
             <MyBusinessesTab
@@ -341,20 +358,33 @@ function DiscoverTab({
   onStart,
   pendingKeyword,
   onPendingKeywordHandled,
+  activeKeyword,
+  setActiveKeyword,
+  results,
+  setResults,
+  searching,
+  setSearching,
+  keywordsCleared,
+  setKeywordsCleared,
 }: {
   refreshKey: number;
   onStart: () => void;
   pendingKeyword: string | null;
   onPendingKeywordHandled: () => void;
+  activeKeyword: string | null;
+  setActiveKeyword: (kw: string | null) => void;
+  results: Business[];
+  setResults: Dispatch<SetStateAction<Business[]>>;
+  searching: boolean;
+  setSearching: (v: boolean) => void;
+  keywordsCleared: boolean;
+  setKeywordsCleared: (v: boolean) => void;
 }) {
   const [keyword, setKeyword] = useState("");
   const [city, setCity] = useState("");
   const [savedKeywords, setSavedKeywords] = useState<string[]>([]);
-  const [activeKeyword, setActiveKeyword] = useState<string | null>(null);
-  const [results, setResults] = useState<Business[]>([]);
   const [starting, setStarting] = useState(false);
   const [scanStarting, setScanStarting] = useState(false);
-  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     loadSavedKeywords();
@@ -414,6 +444,7 @@ function DiscoverTab({
     setActiveKeyword(keyword);
     setResults([]);
     setSearching(true);
+    setKeywordsCleared(false); // a fresh manual search - bring the saved-keyword pills back too
     setStarting(false);
   }
 
@@ -422,6 +453,15 @@ function DiscoverTab({
     setSearching(false);
     const { data } = await supabase.from("businesses").select("*").eq("keyword", kw);
     setResults((data ?? []) as Business[]);
+  }
+
+  // Only clears what's on screen - saved businesses stay in the database.
+  // Results otherwise persist (even across tab switches) until either this
+  // is clicked or a new manual search overwrites them.
+  function clearResults() {
+    setActiveKeyword(null);
+    setResults([]);
+    setSearching(false);
   }
 
   async function toggleMonitored(id: string, monitored: boolean) {
@@ -480,9 +520,17 @@ function DiscoverTab({
         </div>
       </div>
 
-      {savedKeywords.length > 0 && (
+      {savedKeywords.length > 0 && !keywordsCleared && (
         <div>
-          <h3 className="text-sm font-semibold text-muted mb-2">Saved searches</h3>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-muted">Saved searches</h3>
+            <button
+              onClick={() => setKeywordsCleared(true)}
+              className="text-xs font-semibold text-muted hover:text-alert-600 focus-ring"
+            >
+              Clear keywords
+            </button>
+          </div>
           <div className="flex flex-wrap gap-2">
             {savedKeywords.map((kw) => (
               <button
@@ -502,7 +550,7 @@ function DiscoverTab({
       )}
 
       {activeKeyword && (
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
           {searching ? (
             <span className="text-sm text-muted flex items-center">
               Searching for <strong className="text-ink mx-1">{activeKeyword}</strong>
@@ -513,13 +561,21 @@ function DiscoverTab({
               {results.length} results for <strong className="text-ink">{activeKeyword}</strong>
             </span>
           )}
-          <button
-            onClick={() => runProfessionScan(activeKeyword)}
-            disabled={scanStarting || searching}
-            className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring disabled:opacity-50"
-          >
-            {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
-          </button>
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => runProfessionScan(activeKeyword)}
+              disabled={scanStarting || searching}
+              className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring disabled:opacity-50"
+            >
+              {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
+            </button>
+            <button
+              onClick={clearResults}
+              className="text-sm font-semibold text-muted hover:text-alert-600 focus-ring"
+            >
+              ✕ Clear results
+            </button>
+          </div>
         </div>
       )}
 
@@ -569,6 +625,7 @@ function MyBusinessesTab({
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessLookup, setBusinessLookup] = useState<Record<string, Business>>({});
   const [reviews, setReviews] = useState<Review[]>([]);
+  const [scanLogLookup, setScanLogLookup] = useState<Record<string, ScrapeLog>>({});
   const [checking, setChecking] = useState(false);
   const [lastChecked, setLastChecked] = useState<string | null>(null);
   const [view, setView] = useState<"negative" | "all" | "businesses">("negative");
@@ -604,8 +661,24 @@ function MyBusinessesTab({
       .from("reviews")
       .select("*")
       .order("review_date", { ascending: false })
-      .limit(100);
+      .limit(200);
     setReviews((rev ?? []) as Review[]);
+
+    // Fetch the run (scrape_log) each of those reviews came from, so they
+    // can be grouped into one box per run instead of one big mixed list.
+    const scanIds = Array.from(
+      new Set((rev ?? []).map((r) => (r as Review).scan_id).filter((id): id is string => !!id))
+    );
+    if (scanIds.length > 0) {
+      const { data: runLogs } = await supabase.from("scrape_logs").select("*").in("id", scanIds);
+      const lookup: Record<string, ScrapeLog> = {};
+      (runLogs ?? []).forEach((l) => {
+        lookup[(l as ScrapeLog).id] = l as ScrapeLog;
+      });
+      setScanLogLookup(lookup);
+    } else {
+      setScanLogLookup({});
+    }
 
     const { data: log } = await supabase
       .from("scrape_logs")
@@ -734,6 +807,36 @@ function MyBusinessesTab({
   }
 
   const shown = view === "negative" ? reviews.filter((r) => r.is_negative) : reviews;
+
+  // Groups the loaded reviews by which run found them, newest run first,
+  // so "new" and "previous" results never end up mixed in one flat list.
+  // Reviews with no scan_id (older data from before runs were tracked)
+  // fall into their own trailing group.
+  type ReviewGroup = { scanId: string | null; log: ScrapeLog | null; reviews: Review[] };
+  const groupedReviews: ReviewGroup[] = useMemo(() => {
+    const map = new Map<string, ReviewGroup>();
+    const unlinked: Review[] = [];
+    for (const r of reviews) {
+      if (!r.scan_id) {
+        unlinked.push(r);
+        continue;
+      }
+      if (!map.has(r.scan_id)) {
+        map.set(r.scan_id, { scanId: r.scan_id, log: scanLogLookup[r.scan_id] ?? null, reviews: [] });
+      }
+      map.get(r.scan_id)!.reviews.push(r);
+    }
+    const groups = Array.from(map.values()).sort((a, b) => {
+      const at = a.log?.ran_at ? new Date(a.log.ran_at).getTime() : 0;
+      const bt = b.log?.ran_at ? new Date(b.log.ran_at).getTime() : 0;
+      return bt - at;
+    });
+    if (unlinked.length > 0) {
+      groups.push({ scanId: null, log: null, reviews: unlinked });
+    }
+    return groups;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviews, scanLogLookup]);
 
   function reviewCard(r: Review) {
     const biz = businessLookup[r.business_id];
@@ -925,11 +1028,40 @@ function MyBusinessesTab({
               ))}
             </div>
           ) : (
-            <div className="grid gap-3">
+            <div className="space-y-5">
               {shown.length === 0 && (
                 <div className="text-sm text-muted py-10 text-center">No reviews to show yet.</div>
               )}
-              {shown.map(reviewCard)}
+              {groupedReviews.map((g) => {
+                const groupShown = view === "negative" ? g.reviews.filter((r) => r.is_negative) : g.reviews;
+                if (groupShown.length === 0) return null;
+                return (
+                  <div key={g.scanId ?? "unlinked"} className="space-y-3">
+                    <div className="bg-brand-50 border border-brand-400 rounded-xl2 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+                      <div>
+                        <div className="text-sm font-semibold text-brand-600">
+                          {g.log ? runTypeLabel(g.log.run_type) : "Earlier reviews"}
+                        </div>
+                        <div className="text-xs text-muted">
+                          {g.log ? new Date(g.log.ran_at).toLocaleString() : "Run details unavailable"} ·{" "}
+                          {groupShown.length} {view === "negative" ? "negative " : ""}
+                          review{groupShown.length === 1 ? "" : "s"}
+                        </div>
+                      </div>
+                      {g.log && g.log.run_type !== "discover" && (
+                        <button
+                          onClick={(e) => downloadRunCsv(g.log!, e)}
+                          disabled={exportingRunId === g.log.id}
+                          className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring px-3 py-1.5 disabled:opacity-50"
+                        >
+                          {exportingRunId === g.log.id ? "Exporting…" : "⬇ Download CSV"}
+                        </button>
+                      )}
+                    </div>
+                    <div className="grid gap-3 pl-1">{groupShown.map(reviewCard)}</div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </>
