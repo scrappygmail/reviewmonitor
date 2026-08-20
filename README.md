@@ -58,6 +58,16 @@ A few constraints shaped the design:
 
 See [`SETUP.md`](./SETUP.md) for a full step-by-step deployment guide — Supabase, GitHub Actions, Cloudflare Pages, environment variables, push notifications. No prior DevOps experience required.
 
+## What's new
+
+A few small additions on top of the original build:
+
+- **Per-run CSV export.** Every scan/discover run in "Recent activity" now has a ⬇ button — one click gets you a CSV of just that run's negative reviews (business, address, rating, review text, author, date, Maps link). Generated client-side, no extra backend needed.
+- **28-day scan window.** Scraper now only pulls reviews from the last 28 days per run (was 90) — keeps runs faster and results fresher.
+- **Errors actually show up now.** Discover / scan / check-now used to fail silently and just sit on "Searching…" forever if something went wrong server-side. Now you get an alert telling you what broke.
+
+**Gotcha to remember:** the `GITHUB_ACTIONS_TOKEN` in Cloudflare Pages env vars is a personal access token — it *will* expire or get revoked eventually. If the dashboard buttons start hanging on "Starting…" with no error (or now, a "Bad credentials" alert), that token is almost always the culprit. Fix: generate a fresh one on GitHub, drop it into Cloudflare Pages → Settings → Environment variables, then hit "Retry deployment" so it actually picks up the change.
+
 ## License
 
 MIT — use it, fork it, deploy it for yourself or anyone else.
