@@ -389,10 +389,25 @@ function DiscoverTab({
     if (!keyword || !city) return;
     setStarting(true);
     onStart();
-    await fetch("/api/discover", {
-      method: "POST",
-      body: JSON.stringify({ keyword, city }),
-    });
+    try {
+      const res = await fetch("/api/discover", {
+        method: "POST",
+        body: JSON.stringify({ keyword, city }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok || body?.ok === false) {
+        alert(
+          `Couldn't start the search: ${body?.error ?? `server returned ${res.status}`}\n\n` +
+            `Check Cloudflare Pages → Settings → Environment variables (GITHUB_OWNER, GITHUB_REPO, GITHUB_ACTIONS_TOKEN).`
+        );
+        setStarting(false);
+        return;
+      }
+    } catch (e) {
+      alert(`Network error starting the search: ${e}`);
+      setStarting(false);
+      return;
+    }
     // Optimistically switch to this keyword's results view - the
     // JobStatusBanner above will show live progress, and results appear
     // here automatically once the job finishes (via refreshKey).
@@ -420,10 +435,18 @@ function DiscoverTab({
   async function runProfessionScan(kw: string) {
     setScanStarting(true);
     onStart();
-    await fetch("/api/profession-scan", {
-      method: "POST",
-      body: JSON.stringify({ keyword: kw }),
-    });
+    try {
+      const res = await fetch("/api/profession-scan", {
+        method: "POST",
+        body: JSON.stringify({ keyword: kw }),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok || body?.ok === false) {
+        alert(`Couldn't start the scan: ${body?.error ?? `server returned ${res.status}`}`);
+      }
+    } catch (e) {
+      alert(`Network error starting the scan: ${e}`);
+    }
     setScanStarting(false);
   }
 
@@ -604,7 +627,15 @@ function MyBusinessesTab({
   async function checkNow() {
     setChecking(true);
     onStart();
-    await fetch("/api/check-now", { method: "POST" });
+    try {
+      const res = await fetch("/api/check-now", { method: "POST" });
+      const body = await res.json().catch(() => null);
+      if (!res.ok || body?.ok === false) {
+        alert(`Couldn't start the check: ${body?.error ?? `server returned ${res.status}`}`);
+      }
+    } catch (e) {
+      alert(`Network error starting the check: ${e}`);
+    }
     setChecking(false);
   }
 
