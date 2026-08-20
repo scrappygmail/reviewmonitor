@@ -386,6 +386,22 @@ function DiscoverTab({
   const [starting, setStarting] = useState(false);
   const [scanStarting, setScanStarting] = useState(false);
 
+  // "Show negative reviews" reads whatever has already been scanned for
+  // these businesses (fast, no new job) - separate from "Scan all reviews
+  // for negatives", which actually kicks off a new scraping run.
+  const [negativeReviews, setNegativeReviews] = useState<Review[]>([]);
+  const [showingNegatives, setShowingNegatives] = useState(false);
+  const [loadingNegatives, setLoadingNegatives] = useState(false);
+
+  const resultsLookup = useMemo(() => {
+    const map: Record<string, Business> = {};
+    results.forEach((b) => {
+      map[b.id] = b;
+    });
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results]);
+
   useEffect(() => {
     loadSavedKeywords();
   }, []);
@@ -395,6 +411,7 @@ function DiscoverTab({
   useEffect(() => {
     loadSavedKeywords();
     if (activeKeyword) loadKeywordList(activeKeyword);
+    if (showingNegatives) loadNegativeReviews();
     setSearching(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
@@ -444,13 +461,19 @@ function DiscoverTab({
     setActiveKeyword(keyword);
     setResults([]);
     setSearching(true);
-    setKeywordsCleared(false); // a fresh manual search - bring the saved-keyword pills back too
+    setShowingNegatives(false);
+    setNegativeReviews([]);
+    // NOTE: keywordsCleared is intentionally left alone here - once the
+    // user hides the saved-keyword pills, they stay hidden. Auto-restoring
+    // them on every new search was the bug being fixed.
     setStarting(false);
   }
 
   async function loadKeywordList(kw: string) {
     setActiveKeyword(kw);
     setSearching(false);
+    setShowingNegatives(false);
+    setNegativeReviews([]);
     const { data } = await supabase.from("businesses").select("*").eq("keyword", kw);
     setResults((data ?? []) as Business[]);
   }
@@ -462,6 +485,8 @@ function DiscoverTab({
     setActiveKeyword(null);
     setResults([]);
     setSearching(false);
+    setShowingNegatives(false);
+    setNegativeReviews([]);
   }
 
   async function toggleMonitored(id: string, monitored: boolean) {
@@ -488,6 +513,67 @@ function DiscoverTab({
       alert(`Network error starting the scan: ${e}`);
     }
     setScanStarting(false);
+  }
+
+  // Shows negative reviews already sitting in the database for the
+  // businesses currently on screen - does NOT trigger a new scan. Use
+  // "Scan all reviews for negatives" for that.
+  async function loadNegativeReviews() {
+    if (results.length === 0) return;
+    setLoadingNegatives(true);
+    setShowingNegatives(true);
+    const { data } = await supabase
+      .from("reviews")
+      .select("*")
+      .in(
+        "business_id",
+        results.map((b) => b.id)
+      )
+      .eq("is_negative", true)
+      .order("review_date", { ascending: false });
+    setNegativeReviews((data ?? []) as Review[]);
+    setLoadingNegatives(false);
+  }
+
+  function downloadDiscoverNegativesCsv() {
+    if (negativeReviews.length === 0) return;
+    const header = [
+      "Business Name",
+      "Address",
+      "City",
+      "Keyword",
+      "Rating",
+      "Review Text",
+      "Author",
+      "Review Date",
+      "Google Maps Link",
+    ];
+    const rows = negativeReviews.map((r) => {
+      const biz = resultsLookup[r.business_id];
+      return [
+        biz?.name ?? "",
+        biz?.address ?? "",
+        biz?.city ?? "",
+        biz?.keyword ?? "",
+        String(r.rating),
+        r.review_text ?? "",
+        r.author ?? "",
+        r.review_date ? new Date(r.review_date).toLocaleDateString() : "",
+        biz?.google_maps_url ?? "",
+      ];
+    });
+    const csv = [header, ...rows].map((row) => row.map(csvEscape).join(",")).join("\r\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const label = (activeKeyword ?? "search").replace(/\s+/g, "-").toLowerCase();
+    a.href = url;
+    a.download = `negative-reviews_${label}_${dateStr}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -561,11 +647,20 @@ function DiscoverTab({
               {results.length} results for <strong className="text-ink">{activeKeyword}</strong>
             </span>
           )}
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
+            <button
+              onClick={loadNegativeReviews}
+              disabled={loadingNegatives || results.length === 0}
+              className="text-sm font-semibold text-alert-600 hover:text-alert-500 focus-ring disabled:opacity-50"
+              title="Shows negative reviews already scanned for these businesses - no new scan"
+            >
+              {loadingNegatives ? "Loading…" : "Show negative reviews"}
+            </button>
             <button
               onClick={() => runProfessionScan(activeKeyword)}
               disabled={scanStarting || searching}
               className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring disabled:opacity-50"
+              title="Starts a new scan of every business's reviews - takes a while"
             >
               {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
             </button>
@@ -575,6 +670,74 @@ function DiscoverTab({
             >
               ✕ Clear results
             </button>
+          </div>
+        </div>
+      )}
+
+      {showingNegatives && (
+        <div className="bg-alert-50 border border-alert-400 rounded-xl2 p-4 shadow-card space-y-3">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-sm font-semibold text-alert-600">
+                {loadingNegatives
+                  ? "Loading…"
+                  : `${negativeReviews.length} negative review${negativeReviews.length === 1 ? "" : "s"} found so far`}
+              </div>
+              <div className="text-xs text-muted">
+                From reviews already scanned for these businesses — run a scan above to check for more.
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {negativeReviews.length > 0 && (
+                <button
+                  onClick={downloadDiscoverNegativesCsv}
+                  className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring px-3 py-1.5"
+                >
+                  ⬇ Download CSV
+                </button>
+              )}
+              <button
+                onClick={() => setShowingNegatives(false)}
+                className="text-sm font-semibold text-muted hover:text-ink focus-ring px-3 py-1.5"
+              >
+                ✕ Hide
+              </button>
+            </div>
+          </div>
+          {!loadingNegatives && negativeReviews.length === 0 && (
+            <p className="text-sm text-muted">
+              No negative reviews found yet — click &quot;Scan all reviews for negatives&quot; above to check
+              these businesses.
+            </p>
+          )}
+          <div className="grid gap-3">
+            {negativeReviews.map((r) => {
+              const biz = resultsLookup[r.business_id];
+              return (
+                <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
+                  <div className="flex items-center justify-between mb-1">
+                    {biz ? (
+                      <a
+                        href={biz.google_maps_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-semibold text-sm text-brand-600 hover:underline"
+                      >
+                        {biz.name}
+                      </a>
+                    ) : (
+                      <span className="font-semibold text-sm text-muted">Unknown business</span>
+                    )}
+                    <RatingBadge rating={r.rating} />
+                  </div>
+                  {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
+                  <p className="text-sm text-muted">{r.review_text}</p>
+                  <div className="text-xs text-muted mt-2">
+                    {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
