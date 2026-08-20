@@ -145,6 +145,28 @@ function csvEscape(field: string): string {
   return needsQuotes ? `"${escaped}"` : escaped;
 }
 
+// Some businesses saved before the scraper fix have a raw JSON string
+// (e.g. {"borough":"","street":"","city":"",...}) sitting in the address
+// field instead of plain text. Parse it into something readable, or drop
+// it if every part inside is empty, instead of showing the JSON blob.
+function formatAddress(raw?: string | null): string {
+  if (!raw) return "";
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parts = JSON.parse(trimmed) as Record<string, string>;
+      const order = ["street", "borough", "city", "state", "postal_code", "country"];
+      return order
+        .map((k) => (parts[k] ? String(parts[k]).trim() : ""))
+        .filter(Boolean)
+        .join(", ");
+    } catch {
+      return "";
+    }
+  }
+  return trimmed;
+}
+
 function timeAgo(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
   const mins = Math.floor(diffMs / 60000);
@@ -552,7 +574,7 @@ function DiscoverTab({
       const biz = resultsLookup[r.business_id];
       return [
         biz?.name ?? "",
-        biz?.address ?? "",
+        formatAddress(biz?.address),
         biz?.city ?? "",
         biz?.keyword ?? "",
         String(r.rating),
@@ -636,22 +658,24 @@ function DiscoverTab({
       )}
 
       {activeKeyword && (
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          {searching ? (
-            <span className="text-sm text-muted flex items-center">
-              Searching for <strong className="text-ink mx-1">{activeKeyword}</strong>
-              <LoadingDots />
-            </span>
-          ) : (
-            <span className="text-sm text-muted">
-              {results.length} results for <strong className="text-ink">{activeKeyword}</strong>
-            </span>
-          )}
-          <div className="flex items-center gap-4 flex-wrap">
+        <div className="space-y-2.5">
+          <div>
+            {searching ? (
+              <span className="text-sm text-muted flex items-center">
+                Searching for <strong className="text-ink mx-1">{activeKeyword}</strong>
+                <LoadingDots />
+              </span>
+            ) : (
+              <span className="text-sm text-muted">
+                {results.length} results for <strong className="text-ink">{activeKeyword}</strong>
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
             <button
               onClick={loadNegativeReviews}
               disabled={loadingNegatives || results.length === 0}
-              className="text-sm font-semibold text-alert-600 hover:text-alert-500 focus-ring disabled:opacity-50"
+              className="text-xs font-semibold text-alert-600 border border-alert-400 rounded-full px-3 py-1.5 hover:bg-alert-50 focus-ring disabled:opacity-50"
               title="Shows negative reviews already scanned for these businesses - no new scan"
             >
               {loadingNegatives ? "Loading…" : "Show negative reviews"}
@@ -659,14 +683,14 @@ function DiscoverTab({
             <button
               onClick={() => runProfessionScan(activeKeyword)}
               disabled={scanStarting || searching}
-              className="text-sm font-semibold text-brand-600 hover:text-brand-500 focus-ring disabled:opacity-50"
+              className="text-xs font-semibold text-brand-600 border border-brand-400 rounded-full px-3 py-1.5 hover:bg-brand-50 focus-ring disabled:opacity-50"
               title="Starts a new scan of every business's reviews - takes a while"
             >
               {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
             </button>
             <button
               onClick={clearResults}
-              className="text-sm font-semibold text-muted hover:text-alert-600 focus-ring"
+              className="text-xs font-semibold text-muted border border-line rounded-full px-3 py-1.5 hover:bg-alert-50 hover:text-alert-600 hover:border-alert-400 focus-ring"
             >
               ✕ Clear results
             </button>
@@ -730,7 +754,7 @@ function DiscoverTab({
                     )}
                     <RatingBadge rating={r.rating} />
                   </div>
-                  {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
+                  {formatAddress(biz?.address) && <div className="text-xs text-muted mb-1">{formatAddress(biz.address)}</div>}
                   <p className="text-sm text-muted">{r.review_text}</p>
                   <div className="text-xs text-muted mt-2">
                     {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
@@ -751,7 +775,7 @@ function DiscoverTab({
             <div>
               <div className="font-semibold text-sm">{b.name}</div>
               <div className="text-xs text-muted mt-0.5">
-                {b.address} {b.rating ? `· ★ ${b.rating}` : ""}
+                {formatAddress(b.address)} {b.rating ? `· ★ ${b.rating}` : ""}
               </div>
             </div>
             <button
@@ -940,7 +964,7 @@ function MyBusinessesTab({
         const biz = businessLookup[r.business_id];
         return [
           biz?.name ?? "",
-          biz?.address ?? "",
+          formatAddress(biz?.address),
           biz?.city ?? "",
           biz?.keyword ?? "",
           String(r.rating),
@@ -1020,7 +1044,7 @@ function MyBusinessesTab({
           )}
           <RatingBadge rating={r.rating} />
         </div>
-        {biz?.address && <div className="text-xs text-muted mb-1">{biz.address}</div>}
+        {formatAddress(biz?.address) && <div className="text-xs text-muted mb-1">{formatAddress(biz.address)}</div>}
         <p className="text-sm text-muted">{r.review_text}</p>
         <div className="text-xs text-muted mt-2">
           {r.author} {r.review_date ? `· ${new Date(r.review_date).toLocaleDateString()}` : ""}
@@ -1176,7 +1200,7 @@ function MyBusinessesTab({
                   <div>
                     <div className="font-semibold text-sm">{b.name}</div>
                     <div className="text-xs text-muted mt-0.5">
-                      {b.address} {b.rating ? `· ★ ${b.rating}` : ""}
+                      {formatAddress(b.address)} {b.rating ? `· ★ ${b.rating}` : ""}
                     </div>
                   </div>
                   <button

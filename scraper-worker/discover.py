@@ -15,6 +15,7 @@ fix, not a redesign.
 """
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
@@ -33,10 +34,35 @@ COLUMN_ALIASES = {
 }
 
 
-def _first_present(row: dict, keys: list[str]):
+def _clean_address(v):
+    """gosom sometimes puts a structured column (complete_address /
+    full_address) that comes back as a JSON object string like
+    '{"borough":"","street":"","city":"","postal_code":"","state":"",
+    "country":""}' instead of plain text - that's non-empty as a string
+    even when every field inside it is blank, so it was winning over the
+    real (empty) "address" column and showing up as garbage on the
+    dashboard. Turn it into a readable address, or drop it if there's
+    nothing usable inside."""
+    if not v:
+        return v
+    stripped = v.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            parts = json.loads(stripped)
+        except (ValueError, TypeError):
+            return None
+        ordered_keys = ["street", "borough", "city", "state", "postal_code", "country"]
+        pieces = [str(parts[k]).strip() for k in ordered_keys if parts.get(k)]
+        return ", ".join(pieces) if pieces else None
+    return v
+
+
+def _first_present(row: dict, keys: list[str], transform=None):
     for k in keys:
         if k in row and row[k]:
-            return row[k]
+            value = transform(row[k]) if transform else row[k]
+            if value:
+                return value
     return None
 
 
@@ -85,7 +111,7 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                     "name": _first_present(row, COLUMN_ALIASES["name"]),
                     "google_maps_url": _first_present(row, COLUMN_ALIASES["google_maps_url"]),
                     "place_id": _first_present(row, COLUMN_ALIASES["place_id"]),
-                    "address": _first_present(row, COLUMN_ALIASES["address"]),
+                    "address": _first_present(row, COLUMN_ALIASES["address"], transform=_clean_address),
                     "rating": _to_float(_first_present(row, COLUMN_ALIASES["rating"])),
                 })
         return [r for r in results if r["google_maps_url"]]
