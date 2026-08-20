@@ -9,6 +9,8 @@ type Business = {
   name: string;
   google_maps_url: string;
   address: string | null;
+  phone: string | null;
+  email: string | null;
   keyword: string;
   city: string | null;
   rating: number | null;
@@ -608,6 +610,8 @@ function DiscoverTab({
     if (negativeReviews.length === 0) return;
     const header = [
       "Business Name",
+      "Phone",
+      "Email",
       "Address",
       "City",
       "Keyword",
@@ -621,6 +625,8 @@ function DiscoverTab({
       const biz = resultsLookup[r.business_id];
       return [
         biz?.name ?? "",
+        biz?.phone ?? "",
+        biz?.email ?? "",
         formatAddress(biz?.address),
         biz?.city ?? "",
         biz?.keyword ?? "",
@@ -824,6 +830,7 @@ function DiscoverTab({
               <div className="text-xs text-muted mt-0.5">
                 {formatAddress(b.address)} {b.rating ? `· ★ ${b.rating}` : ""}
               </div>
+              {b.phone && <div className="text-xs text-muted mt-0.5">📞 {b.phone}</div>}
             </div>
             <button
               onClick={() => toggleMonitored(b.id, b.monitored)}
@@ -1003,6 +1010,8 @@ function MyBusinessesTab({
 
       const header = [
         "Business Name",
+        "Phone",
+        "Email",
         "Address",
         "City",
         "Keyword",
@@ -1017,6 +1026,8 @@ function MyBusinessesTab({
         const biz = businessLookup[r.business_id];
         return [
           biz?.name ?? "",
+          biz?.phone ?? "",
+          biz?.email ?? "",
           formatAddress(biz?.address),
           biz?.city ?? "",
           biz?.keyword ?? "",

@@ -17,6 +17,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,7 +32,29 @@ COLUMN_ALIASES = {
     "place_id": ["place_id", "cid", "input_id"],
     "address": ["address", "complete_address", "full_address"],
     "rating": ["review_rating", "rating"],
+    "phone": ["phone"],
+    "email": ["emails", "email"],
 }
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
+def _clean_email(v):
+    """gosom's -email flag returns an 'emails' column that can hold more
+    than one address (format not documented) - split on common
+    separators and take the first one that actually looks like an email,
+    rather than storing whatever raw punctuation-joined string comes
+    back."""
+    if not v:
+        return None
+    for piece in re.split(r"[,;\s]+", v.strip()):
+        match = _EMAIL_RE.fullmatch(piece.strip().strip(".,;"))
+        if match:
+            return match.group(0)
+    # fallback: pull the first email-looking substring out of the raw text
+    match = _EMAIL_RE.search(v)
+    return match.group(0) if match else None
 
 
 def _clean_address(v):
@@ -95,10 +118,15 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                 # more listings (engine default is 10; 30 gets a fuller list
                 # per keyword+city search without taking too long).
                 "-depth", "30",
+                # visits each business's website looking for a contact email -
+                # gosom's own docs warn this "increases processing time
+                # significantly", which is why the timeout below and the
+                # workflow's timeout-minutes were both bumped up to match.
+                "-email",
                 "-exit-on-inactivity", "3m",
             ],
             check=True,
-            timeout=60 * 30,
+            timeout=60 * 50,
         )
 
         results = []
@@ -113,6 +141,8 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                     "place_id": _first_present(row, COLUMN_ALIASES["place_id"]),
                     "address": _first_present(row, COLUMN_ALIASES["address"], transform=_clean_address),
                     "rating": _to_float(_first_present(row, COLUMN_ALIASES["rating"])),
+                    "phone": _first_present(row, COLUMN_ALIASES["phone"]),
+                    "email": _first_present(row, COLUMN_ALIASES["email"], transform=_clean_email),
                 })
         return [r for r in results if r["google_maps_url"]]
 
@@ -127,9 +157,16 @@ def save_results(keyword: str, city: str, results: list[dict]) -> int:
             "place_id": r.get("place_id"),
             "address": r.get("address"),
             "rating": r.get("rating"),
+            "phone": r.get("phone"),
+            "email": r.get("email"),
             "keyword": keyword,
             "city": city,
-            "monitored": False,
+            # NOTE: "monitored" is intentionally NOT included here. Supabase's
+            # upsert only touches the columns present in the payload on a
+            # conflict, so omitting it means re-discovering a business
+            # someone already added to their watch list won't silently
+            # un-monitor it. New rows still default to false via the
+            # column's schema default.
         }
         if row["place_id"]:
             client.table("businesses").upsert(row, on_conflict="place_id").execute()

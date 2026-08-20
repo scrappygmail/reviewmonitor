@@ -14,6 +14,8 @@ create table businesses (
   google_maps_url text not null,
   place_id text unique,
   address text,
+  phone text,                    -- business's own contact number (from Google listing)
+  email text,                    -- best-effort, scraped from the business website if listed
   keyword text not null,        -- e.g. "plumber", "electrician"
   city text,                    -- e.g. "Manchester"
   rating numeric,                -- overall business rating (from discovery)
