@@ -61,6 +61,40 @@ export default function Dashboard() {
   const [discoverSearching, setDiscoverSearching] = useState(false);
   const [keywordsCleared, setKeywordsCleared] = useState(false);
 
+  // Component state alone only survives switching tabs inside the app - a
+  // real page reload/refresh (or the mobile browser reloading a
+  // backgrounded tab) wipes it completely since it never leaves memory.
+  // Persist the keyword (not the actual result rows - those get re-fetched
+  // fresh) and the cleared-keywords flag to localStorage so a refresh
+  // restores the same view instead of coming back empty.
+  useEffect(() => {
+    try {
+      const savedKeyword = localStorage.getItem("rm_active_keyword");
+      if (savedKeyword) setDiscoverActiveKeyword(savedKeyword);
+      const savedCleared = localStorage.getItem("rm_keywords_cleared");
+      if (savedCleared === "1") setKeywordsCleared(true);
+    } catch {
+      // localStorage unavailable (private browsing etc.) - just skip persistence
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      if (discoverActiveKeyword) localStorage.setItem("rm_active_keyword", discoverActiveKeyword);
+      else localStorage.removeItem("rm_active_keyword");
+    } catch {
+      // ignore
+    }
+  }, [discoverActiveKeyword]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("rm_keywords_cleared", keywordsCleared ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [keywordsCleared]);
+
   return (
     <main className="min-h-screen">
       <Header />
@@ -447,6 +481,19 @@ function DiscoverTab({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingKeyword]);
+
+  // Handles the page-refresh case: the parent restores activeKeyword from
+  // localStorage shortly AFTER this component's first render (its own
+  // effect fires one tick later), so the [refreshKey] effect above already
+  // ran once with activeKeyword still null and won't fire again on its
+  // own. Watching activeKeyword directly catches that restore and
+  // re-fetches its businesses.
+  useEffect(() => {
+    if (activeKeyword && results.length === 0 && !searching) {
+      loadKeywordList(activeKeyword);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKeyword]);
 
   async function loadSavedKeywords() {
     const { data } = await supabase.from("businesses").select("keyword");
@@ -844,28 +891,41 @@ function MyBusinessesTab({
     });
     setBusinessLookup(lookup);
 
-    const { data: rev } = await supabase
-      .from("reviews")
+    // Recent activity drives both the compact list below AND which runs'
+    // reviews get grouped into boxes - fetched first so the two always
+    // agree on counts.
+    const { data: logs } = await supabase
+      .from("scrape_logs")
       .select("*")
-      .order("review_date", { ascending: false })
-      .limit(200);
-    setReviews((rev ?? []) as Review[]);
+      .order("ran_at", { ascending: false })
+      .limit(8);
+    const recentLogs = (logs ?? []) as ScrapeLog[];
+    setActivity(recentLogs);
 
-    // Fetch the run (scrape_log) each of those reviews came from, so they
-    // can be grouped into one box per run instead of one big mixed list.
-    const scanIds = Array.from(
-      new Set((rev ?? []).map((r) => (r as Review).scan_id).filter((id): id is string => !!id))
-    );
+    const scanLookup: Record<string, ScrapeLog> = {};
+    recentLogs.forEach((l) => {
+      scanLookup[l.id] = l;
+    });
+    setScanLogLookup(scanLookup);
+
+    // IMPORTANT: fetch every review belonging to these specific runs (by
+    // scan_id), not just "the most recent 200 reviews by review_date".
+    // review_date is when the review was posted on Google, not when it
+    // was scraped - a "full rotation sweep" can surface hundreds of newly
+    // found reviews that were posted months/years ago, and sorting by
+    // review_date alone would bury most of a big run outside a small
+    // limit, undercounting its negative reviews on screen.
+    const scanIds = recentLogs.map((l) => l.id);
+    let rev: Review[] = [];
     if (scanIds.length > 0) {
-      const { data: runLogs } = await supabase.from("scrape_logs").select("*").in("id", scanIds);
-      const lookup: Record<string, ScrapeLog> = {};
-      (runLogs ?? []).forEach((l) => {
-        lookup[(l as ScrapeLog).id] = l as ScrapeLog;
-      });
-      setScanLogLookup(lookup);
-    } else {
-      setScanLogLookup({});
+      const { data } = await supabase
+        .from("reviews")
+        .select("*")
+        .in("scan_id", scanIds)
+        .order("review_date", { ascending: false });
+      rev = (data ?? []) as Review[];
     }
+    setReviews(rev);
 
     const { data: log } = await supabase
       .from("scrape_logs")
@@ -875,13 +935,6 @@ function MyBusinessesTab({
       .limit(1)
       .maybeSingle();
     setLastChecked(log?.ran_at ?? null);
-
-    const { data: logs } = await supabase
-      .from("scrape_logs")
-      .select("*")
-      .order("ran_at", { ascending: false })
-      .limit(8);
-    setActivity((logs ?? []) as ScrapeLog[]);
   }
 
   async function checkNow() {
