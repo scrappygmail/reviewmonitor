@@ -173,7 +173,7 @@ def scan_one_business(client, business: dict, scan_id: str) -> dict:
     return {"new_reviews": new_count, "negative": negative_count}
 
 
-def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> dict:
+def scan_many(business_list: list[dict], run_type: str, keyword: str = None, city: str = None) -> dict:
     """Scans a list of businesses ONE AT A TIME, syncing each to Supabase
     immediately - a timeout or crash partway through never loses already-
     completed businesses. Creates the scrape_logs row up front so every
@@ -185,6 +185,7 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None) -> 
     log_row = client.table("scrape_logs").insert({
         "run_type": run_type,
         "keyword": keyword,
+        "city": city,
         "businesses_scanned": len(business_list),
         "status": "running",
         "ran_at": datetime.now(timezone.utc).isoformat(),

@@ -62,6 +62,8 @@ create table scrape_logs (
   id uuid primary key default gen_random_uuid(),
   run_type text not null,        -- 'discover' | 'monitor' | 'profession_scan' | 'full_scan'
   keyword text,                  -- populated for discover/profession_scan
+  city text,                     -- populated for discover/profession_scan - without this,
+                                  -- "plumber" searches in different cities got merged together
   businesses_scanned int default 0,
   new_reviews_found int default 0,
   negative_reviews_found int default 0,

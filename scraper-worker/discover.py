@@ -179,11 +179,12 @@ def save_results(keyword: str, city: str, results: list[dict]) -> int:
     return saved
 
 
-def log_run(keyword: str, count: int, status: str = "success", error: str = None):
+def log_run(keyword: str, city: str, count: int, status: str = "success", error: str = None):
     client = get_client()
     client.table("scrape_logs").insert({
         "run_type": "discover",
         "keyword": keyword,
+        "city": city,
         "businesses_scanned": count,
         "status": status,
         "error_message": error,
@@ -206,14 +207,14 @@ def main():
     try:
         results = run_gosom_search(args.keyword, args.city)
         count = save_results(args.keyword, args.city, results)
-        log_run(args.keyword, count)
+        log_run(args.keyword, args.city, count)
         print(f"Discovery done: {count} businesses saved for '{args.keyword}' in '{args.city}'")
         try:
             finish_job("done")
         except Exception as e:
             print(f"Failed to finish job status tracking: {e}")
     except Exception as e:
-        log_run(args.keyword, 0, status="failed", error=str(e))
+        log_run(args.keyword, args.city, 0, status="failed", error=str(e))
         try:
             finish_job("failed")
         except Exception as job_err:

@@ -6,6 +6,9 @@ on:
       keyword:
         description: "Keyword to scan (e.g. plumber)"
         required: true
+      city:
+        description: "City to scan (must match the city originally searched)"
+        required: true
 
 jobs:
   profession-scan:
@@ -35,4 +38,4 @@ jobs:
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_CONTACT_EMAIL: ${{ secrets.VAPID_CONTACT_EMAIL }}
           SCRAPER_ENGINE_DIR: ${{ github.workspace }}/engine
-        run: python profession_scan.py --keyword "${{ github.event.inputs.keyword }}"
+        run: python profession_scan.py --keyword "${{ github.event.inputs.keyword }}" --city "${{ github.event.inputs.city }}"

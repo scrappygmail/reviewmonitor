@@ -33,6 +33,7 @@ type ScrapeLog = {
   id: string;
   run_type: string;
   keyword: string | null;
+  city: string | null;
   new_reviews_found: number;
   negative_reviews_found: number;
   status: string;
@@ -52,13 +53,18 @@ export default function Dashboard() {
   const [tab, setTab] = useState<"discover" | "mine">("mine");
   const [refreshKey, setRefreshKey] = useState(0);
   const [localStarting, setLocalStarting] = useState(false);
-  const [pendingKeyword, setPendingKeyword] = useState<string | null>(null);
+  const [pendingSearch, setPendingSearch] = useState<{ keyword: string; city: string } | null>(null);
 
   // Lifted out of DiscoverTab (instead of living as local state there) so
   // the last search's results and the saved-keyword pills survive
   // switching to "My Businesses" and back. They only reset when a new
   // manual search runs, or when the user explicitly hits a "Clear" button.
-  const [discoverActiveKeyword, setDiscoverActiveKeyword] = useState<string | null>(null);
+  //
+  // IMPORTANT: keyword+city together identify a search, not keyword alone -
+  // "plumber" searched in Manchester and "plumber" searched in Texas are
+  // different result sets. Keyword-only used to silently merge every city
+  // ever searched under the same keyword.
+  const [discoverActiveSearch, setDiscoverActiveSearch] = useState<{ keyword: string; city: string } | null>(null);
   const [discoverResults, setDiscoverResults] = useState<Business[]>([]);
   const [discoverSearching, setDiscoverSearching] = useState(false);
   const [keywordsCleared, setKeywordsCleared] = useState(false);
@@ -66,13 +72,14 @@ export default function Dashboard() {
   // Component state alone only survives switching tabs inside the app - a
   // real page reload/refresh (or the mobile browser reloading a
   // backgrounded tab) wipes it completely since it never leaves memory.
-  // Persist the keyword (not the actual result rows - those get re-fetched
-  // fresh) and the cleared-keywords flag to localStorage so a refresh
-  // restores the same view instead of coming back empty.
+  // Persist the keyword+city (not the actual result rows - those get
+  // re-fetched fresh) and the cleared-keywords flag to localStorage so a
+  // refresh restores the same view instead of coming back empty.
   useEffect(() => {
     try {
       const savedKeyword = localStorage.getItem("rm_active_keyword");
-      if (savedKeyword) setDiscoverActiveKeyword(savedKeyword);
+      const savedCity = localStorage.getItem("rm_active_city");
+      if (savedKeyword && savedCity) setDiscoverActiveSearch({ keyword: savedKeyword, city: savedCity });
       const savedCleared = localStorage.getItem("rm_keywords_cleared");
       if (savedCleared === "1") setKeywordsCleared(true);
     } catch {
@@ -82,12 +89,17 @@ export default function Dashboard() {
 
   useEffect(() => {
     try {
-      if (discoverActiveKeyword) localStorage.setItem("rm_active_keyword", discoverActiveKeyword);
-      else localStorage.removeItem("rm_active_keyword");
+      if (discoverActiveSearch) {
+        localStorage.setItem("rm_active_keyword", discoverActiveSearch.keyword);
+        localStorage.setItem("rm_active_city", discoverActiveSearch.city);
+      } else {
+        localStorage.removeItem("rm_active_keyword");
+        localStorage.removeItem("rm_active_city");
+      }
     } catch {
       // ignore
     }
-  }, [discoverActiveKeyword]);
+  }, [discoverActiveSearch]);
 
   useEffect(() => {
     try {
@@ -126,10 +138,10 @@ export default function Dashboard() {
             <DiscoverTab
               refreshKey={refreshKey}
               onStart={() => setLocalStarting(true)}
-              pendingKeyword={pendingKeyword}
-              onPendingKeywordHandled={() => setPendingKeyword(null)}
-              activeKeyword={discoverActiveKeyword}
-              setActiveKeyword={setDiscoverActiveKeyword}
+              pendingSearch={pendingSearch}
+              onPendingSearchHandled={() => setPendingSearch(null)}
+              activeSearch={discoverActiveSearch}
+              setActiveSearch={setDiscoverActiveSearch}
               results={discoverResults}
               setResults={setDiscoverResults}
               searching={discoverSearching}
@@ -141,8 +153,8 @@ export default function Dashboard() {
             <MyBusinessesTab
               refreshKey={refreshKey}
               onStart={() => setLocalStarting(true)}
-              onOpenDiscoverKeyword={(kw) => {
-                setPendingKeyword(kw);
+              onOpenDiscoverSearch={(keyword, city) => {
+                setPendingSearch({ keyword, city });
                 setTab("discover");
               }}
             />
@@ -414,10 +426,10 @@ function JobStatusBanner({
 function DiscoverTab({
   refreshKey,
   onStart,
-  pendingKeyword,
-  onPendingKeywordHandled,
-  activeKeyword,
-  setActiveKeyword,
+  pendingSearch,
+  onPendingSearchHandled,
+  activeSearch,
+  setActiveSearch,
   results,
   setResults,
   searching,
@@ -427,10 +439,10 @@ function DiscoverTab({
 }: {
   refreshKey: number;
   onStart: () => void;
-  pendingKeyword: string | null;
-  onPendingKeywordHandled: () => void;
-  activeKeyword: string | null;
-  setActiveKeyword: (kw: string | null) => void;
+  pendingSearch: { keyword: string; city: string } | null;
+  onPendingSearchHandled: () => void;
+  activeSearch: { keyword: string; city: string } | null;
+  setActiveSearch: (s: { keyword: string; city: string } | null) => void;
   results: Business[];
   setResults: Dispatch<SetStateAction<Business[]>>;
   searching: boolean;
@@ -440,7 +452,10 @@ function DiscoverTab({
 }) {
   const [keyword, setKeyword] = useState("");
   const [city, setCity] = useState("");
-  const [savedKeywords, setSavedKeywords] = useState<string[]>([]);
+  // Distinct keyword+city combos actually saved, e.g. "plumber" in
+  // Manchester AND "plumber" in Texas show as two separate pills - keyword
+  // alone used to merge every city ever searched into one bucket.
+  const [savedSearches, setSavedSearches] = useState<{ keyword: string; city: string }[]>([]);
   const [starting, setStarting] = useState(false);
   const [scanStarting, setScanStarting] = useState(false);
 
@@ -461,46 +476,56 @@ function DiscoverTab({
   }, [results]);
 
   useEffect(() => {
-    loadSavedKeywords();
+    loadSavedSearches();
   }, []);
 
   // Whenever a job finishes (banner tells the parent, which bumps
-  // refreshKey), reload whichever keyword's results are on screen.
+  // refreshKey), reload whichever search's results are on screen.
   useEffect(() => {
-    loadSavedKeywords();
-    if (activeKeyword) loadKeywordList(activeKeyword);
+    loadSavedSearches();
+    if (activeSearch) loadSearchResults(activeSearch.keyword, activeSearch.city);
     if (showingNegatives) loadNegativeReviews();
     setSearching(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
   // Arriving here from a "Recent activity" click on My Businesses -
-  // jump straight to that keyword's results.
+  // jump straight to that search's results.
   useEffect(() => {
-    if (pendingKeyword) {
-      loadKeywordList(pendingKeyword);
-      onPendingKeywordHandled();
+    if (pendingSearch) {
+      loadSearchResults(pendingSearch.keyword, pendingSearch.city);
+      onPendingSearchHandled();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingKeyword]);
+  }, [pendingSearch]);
 
-  // Handles the page-refresh case: the parent restores activeKeyword from
+  // Handles the page-refresh case: the parent restores activeSearch from
   // localStorage shortly AFTER this component's first render (its own
   // effect fires one tick later), so the [refreshKey] effect above already
-  // ran once with activeKeyword still null and won't fire again on its
-  // own. Watching activeKeyword directly catches that restore and
+  // ran once with activeSearch still null and won't fire again on its
+  // own. Watching activeSearch directly catches that restore and
   // re-fetches its businesses.
   useEffect(() => {
-    if (activeKeyword && results.length === 0 && !searching) {
-      loadKeywordList(activeKeyword);
+    if (activeSearch && results.length === 0 && !searching) {
+      loadSearchResults(activeSearch.keyword, activeSearch.city);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKeyword]);
+  }, [activeSearch?.keyword, activeSearch?.city]);
 
-  async function loadSavedKeywords() {
-    const { data } = await supabase.from("businesses").select("keyword");
-    const unique = Array.from(new Set((data ?? []).map((r) => r.keyword)));
-    setSavedKeywords(unique);
+  async function loadSavedSearches() {
+    const { data } = await supabase.from("businesses").select("keyword, city");
+    const seen = new Set<string>();
+    const combos: { keyword: string; city: string }[] = [];
+    (data ?? []).forEach((r) => {
+      const kw = r.keyword ?? "";
+      const c = r.city ?? "";
+      const key = `${kw.toLowerCase()}|||${c.toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        combos.push({ keyword: kw, city: c });
+      }
+    });
+    setSavedSearches(combos);
   }
 
   async function runDiscovery() {
@@ -526,10 +551,10 @@ function DiscoverTab({
       setStarting(false);
       return;
     }
-    // Optimistically switch to this keyword's results view - the
+    // Optimistically switch to this search's results view - the
     // JobStatusBanner above will show live progress, and results appear
     // here automatically once the job finishes (via refreshKey).
-    setActiveKeyword(keyword);
+    setActiveSearch({ keyword, city });
     setResults([]);
     setSearching(true);
     setShowingNegatives(false);
@@ -540,12 +565,14 @@ function DiscoverTab({
     setStarting(false);
   }
 
-  async function loadKeywordList(kw: string) {
-    setActiveKeyword(kw);
+  async function loadSearchResults(kw: string, cty: string) {
+    setActiveSearch({ keyword: kw, city: cty });
     setSearching(false);
     setShowingNegatives(false);
     setNegativeReviews([]);
-    const { data } = await supabase.from("businesses").select("*").eq("keyword", kw);
+    // ilike (no wildcards) = case-insensitive exact match, so "Plumber"
+    // and "plumber" searches land in the same bucket.
+    const { data } = await supabase.from("businesses").select("*").ilike("keyword", kw).ilike("city", cty);
     setResults((data ?? []) as Business[]);
   }
 
@@ -553,7 +580,7 @@ function DiscoverTab({
   // Results otherwise persist (even across tab switches) until either this
   // is clicked or a new manual search overwrites them.
   function clearResults() {
-    setActiveKeyword(null);
+    setActiveSearch(null);
     setResults([]);
     setSearching(false);
     setShowingNegatives(false);
@@ -568,13 +595,13 @@ function DiscoverTab({
     setResults((r) => r.map((b) => (b.id === id ? { ...b, monitored: !monitored } : b)));
   }
 
-  async function runProfessionScan(kw: string) {
+  async function runProfessionScan(kw: string, cty: string) {
     setScanStarting(true);
     onStart();
     try {
       const res = await fetch("/api/profession-scan", {
         method: "POST",
-        body: JSON.stringify({ keyword: kw }),
+        body: JSON.stringify({ keyword: kw, city: cty }),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok || body?.ok === false) {
@@ -642,7 +669,9 @@ function DiscoverTab({
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     const dateStr = new Date().toISOString().slice(0, 10);
-    const label = (activeKeyword ?? "search").replace(/\s+/g, "-").toLowerCase();
+    const label = (activeSearch ? `${activeSearch.keyword}-${activeSearch.city}` : "search")
+      .replace(/\s+/g, "-")
+      .toLowerCase();
     a.href = url;
     a.download = `negative-reviews_${label}_${dateStr}.csv`;
     document.body.appendChild(a);
@@ -681,7 +710,7 @@ function DiscoverTab({
         </div>
       </div>
 
-      {savedKeywords.length > 0 && !keywordsCleared && (
+      {savedSearches.length > 0 && !keywordsCleared && (
         <div>
           <div className="flex items-center justify-between mb-2">
             <h3 className="text-sm font-semibold text-muted">Saved searches</h3>
@@ -693,34 +722,43 @@ function DiscoverTab({
             </button>
           </div>
           <div className="flex flex-wrap gap-2">
-            {savedKeywords.map((kw) => (
-              <button
-                key={kw}
-                onClick={() => loadKeywordList(kw)}
-                className={`px-3 py-1.5 rounded-full text-sm border focus-ring ${
-                  activeKeyword === kw
-                    ? "bg-brand-50 border-brand-400 text-brand-600"
-                    : "bg-surface border-line text-muted hover:text-ink"
-                }`}
-              >
-                {kw}
-              </button>
-            ))}
+            {savedSearches.map(({ keyword: kw, city: cty }) => {
+              const isActive =
+                activeSearch?.keyword.toLowerCase() === kw.toLowerCase() &&
+                activeSearch?.city.toLowerCase() === cty.toLowerCase();
+              return (
+                <button
+                  key={`${kw}|||${cty}`}
+                  onClick={() => loadSearchResults(kw, cty)}
+                  className={`px-3 py-1.5 rounded-full text-sm border focus-ring ${
+                    isActive
+                      ? "bg-brand-50 border-brand-400 text-brand-600"
+                      : "bg-surface border-line text-muted hover:text-ink"
+                  }`}
+                >
+                  {kw}
+                  {cty ? ` — ${cty}` : ""}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
-      {activeKeyword && (
+      {activeSearch && (
         <div className="space-y-2.5">
           <div>
             {searching ? (
               <span className="text-sm text-muted flex items-center">
-                Searching for <strong className="text-ink mx-1">{activeKeyword}</strong>
+                Searching for <strong className="text-ink mx-1">{activeSearch.keyword} — {activeSearch.city}</strong>
                 <LoadingDots />
               </span>
             ) : (
               <span className="text-sm text-muted">
-                {results.length} results for <strong className="text-ink">{activeKeyword}</strong>
+                {results.length} results for{" "}
+                <strong className="text-ink">
+                  {activeSearch.keyword} — {activeSearch.city}
+                </strong>
               </span>
             )}
           </div>
@@ -734,7 +772,7 @@ function DiscoverTab({
               {loadingNegatives ? "Loading…" : "Show negative reviews"}
             </button>
             <button
-              onClick={() => runProfessionScan(activeKeyword)}
+              onClick={() => runProfessionScan(activeSearch.keyword, activeSearch.city)}
               disabled={scanStarting || searching}
               className="text-xs font-semibold text-brand-600 border border-brand-400 rounded-full px-3 py-1.5 hover:bg-brand-50 focus-ring disabled:opacity-50"
               title="Starts a new scan of every business's reviews - takes a while"
@@ -857,11 +895,11 @@ function DiscoverTab({
 function MyBusinessesTab({
   refreshKey,
   onStart,
-  onOpenDiscoverKeyword,
+  onOpenDiscoverSearch,
 }: {
   refreshKey: number;
   onStart: () => void;
-  onOpenDiscoverKeyword: (keyword: string) => void;
+  onOpenDiscoverSearch: (keyword: string, city: string) => void;
 }) {
   const [businesses, setBusinesses] = useState<Business[]>([]);
   const [businessLookup, setBusinessLookup] = useState<Record<string, Business>>({});
@@ -971,7 +1009,7 @@ function MyBusinessesTab({
 
   async function openActivity(log: ScrapeLog) {
     if (log.run_type === "discover") {
-      onOpenDiscoverKeyword(log.keyword ?? "");
+      onOpenDiscoverSearch(log.keyword ?? "", log.city ?? "");
       return;
     }
     setSessionLog(log);
@@ -1158,6 +1196,7 @@ function MyBusinessesTab({
                   <span className="truncate">
                     {runTypeLabel(log.run_type)}
                     {log.keyword ? ` · ${log.keyword}` : ""}
+                    {log.city ? ` — ${log.city}` : ""}
                   </span>
                 </button>
                 <div className="flex items-center gap-3 text-xs text-muted whitespace-nowrap">
