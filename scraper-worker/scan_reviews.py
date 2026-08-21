@@ -13,7 +13,7 @@ Other behaviour carried over from before:
     workflow times out or gets cancelled partway through a list of
     businesses, everything scraped BEFORE that point is already saved.
   - MongoDB sync is explicitly disabled (use_mongodb: false).
-  - max_reviews + date_filter (early_stop, last 28 days) cap how much a
+  - max_reviews + date_filter (early_stop, last 90 days) cap how much a
     single business scrapes.
 
 This only DRIVES the engine via config.yaml + its own `python start.py`
@@ -36,7 +36,7 @@ DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 PER_BUSINESS_TIMEOUT_SECONDS = 8 * 60  # a single stuck business can't eat the whole job
 
 
-SCAN_WINDOW_DAYS = 28  # client wants each run to pull only the last 28 days of reviews
+SCAN_WINDOW_DAYS = 90
 
 
 def _write_config(business: dict):
@@ -182,14 +182,28 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None, cit
     client = get_client()
     total_new, total_negative, errors = 0, 0, 0
 
-    log_row = client.table("scrape_logs").insert({
+    log_payload = {
         "run_type": run_type,
         "keyword": keyword,
         "city": city,
         "businesses_scanned": len(business_list),
         "status": "running",
         "ran_at": datetime.now(timezone.utc).isoformat(),
-    }).execute()
+    }
+    try:
+        log_row = client.table("scrape_logs").insert(log_payload).execute()
+    except Exception as exc:
+        # If the migration that added scrape_logs.city was run recently,
+        # Supabase's PostgREST schema cache can take a while to notice the
+        # new column (it doesn't always refresh instantly on ALTER TABLE).
+        # Without this fallback, EVERY scan died right here before
+        # scanning business #1 - which is why "0 negative reviews" was
+        # showing up across every single search after that migration,
+        # not because of anything wrong with the scanning logic itself.
+        if "PGRST204" not in str(exc) or "city" not in str(exc):
+            raise
+        log_payload.pop("city", None)
+        log_row = client.table("scrape_logs").insert(log_payload).execute()
     scan_id = log_row.data[0]["id"]
 
     try:

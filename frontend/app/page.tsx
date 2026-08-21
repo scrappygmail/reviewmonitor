@@ -685,7 +685,8 @@ function DiscoverTab({
       <div className="bg-surface border border-line rounded-xl2 p-5 shadow-card">
         <h2 className="font-display font-bold text-lg mb-1">Find businesses</h2>
         <p className="text-sm text-muted mb-4">
-          Search a profession and area. Results are saved permanently — add the ones you want to watch.
+          Search a profession and area. For ambiguous cities, include state/country (e.g. "Rome, GA"). Results
+          are saved permanently — add the ones you want to watch.
         </p>
         <div className="flex flex-col sm:flex-row gap-3">
           <input
@@ -697,7 +698,7 @@ function DiscoverTab({
           <input
             value={city}
             onChange={(e) => setCity(e.target.value)}
-            placeholder="e.g. Manchester"
+            placeholder="e.g. Manchester, UK or Rome, GA"
             className="flex-1 border border-line rounded-lg px-4 py-2.5 text-sm focus-ring outline-none"
           />
           <button

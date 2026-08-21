@@ -96,6 +96,115 @@ def _to_float(v):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Location validation: gosom's search is free-text, not a geographic
+# boundary. A "Rome" search can (and did) come back with businesses
+# actually in Rome NY, Rome GA, or nowhere near any Rome at all - so every
+# result gets checked against the requested city/state/country before
+# being saved. For ambiguous city names, pass "City, State" or
+# "City, State, Country" and it'll be enforced too.
+# ---------------------------------------------------------------------------
+
+US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar",
+    "california": "ca", "colorado": "co", "connecticut": "ct", "delaware": "de",
+    "florida": "fl", "georgia": "ga", "hawaii": "hi", "idaho": "id",
+    "illinois": "il", "indiana": "in", "iowa": "ia", "kansas": "ks",
+    "kentucky": "ky", "louisiana": "la", "maine": "me", "maryland": "md",
+    "massachusetts": "ma", "michigan": "mi", "minnesota": "mn", "mississippi": "ms",
+    "missouri": "mo", "montana": "mt", "nebraska": "ne", "nevada": "nv",
+    "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm", "new york": "ny",
+    "north carolina": "nc", "north dakota": "nd", "ohio": "oh", "oklahoma": "ok",
+    "oregon": "or", "pennsylvania": "pa", "rhode island": "ri", "south carolina": "sc",
+    "south dakota": "sd", "tennessee": "tn", "texas": "tx", "utah": "ut",
+    "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
+    "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
+}
+US_STATE_NAMES = {v: k for k, v in US_STATES.items()}
+COUNTRY_ALIASES = {
+    "us": "united states", "usa": "united states", "u.s.": "united states",
+    "uk": "united kingdom", "gb": "united kingdom", "great britain": "united kingdom",
+}
+
+
+def _norm(v):
+    return re.sub(r"\s+", " ", str(v or "").strip().lower())
+
+
+def _norm_state(v):
+    value = _norm(v).replace(".", "")
+    return US_STATES.get(value, value)
+
+
+def _norm_country(v):
+    value = _norm(v)
+    return COUNTRY_ALIASES.get(value, value)
+
+
+def _parse_location_scope(location: str) -> tuple[str, str | None, str | None]:
+    """Parses 'City', 'City, State', or 'City, State, Country'."""
+    parts = [p.strip() for p in location.split(",") if p.strip()]
+    target_city = _norm(parts[0] if parts else location)
+    target_state = _norm_state(parts[1]) if len(parts) >= 2 else None
+    target_country = _norm_country(parts[2]) if len(parts) >= 3 else None
+    return target_city, target_state, target_country
+
+
+def _complete_address_fields(raw: str | None) -> dict:
+    """gosom's complete_address column is a JSON blob like
+    {"borough":"","street":"","city":"","postal_code":"","state":"",
+    "country":""} - this pulls out just the non-empty structured parts,
+    which is where the real city/state/country actually live (there's no
+    separate flat 'city' column in gosom's CSV output)."""
+    if not raw:
+        return {}
+    stripped = raw.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return {}
+    try:
+        parts = json.loads(stripped)
+    except (ValueError, TypeError):
+        return {}
+    return {k: str(v).strip() for k, v in parts.items() if v}
+
+
+def _matches_location(row: dict, location: str) -> bool:
+    """Prefers the structured complete_address fields; falls back to a
+    word-boundary regex match against the plain address text when those
+    aren't present for a given business."""
+    target_city, target_state, target_country = _parse_location_scope(location)
+    fields = _complete_address_fields(row.get("complete_address"))
+    actual_city = _norm(fields.get("city"))
+    actual_state = _norm_state(fields["state"]) if fields.get("state") else ""
+    actual_country = _norm_country(fields["country"]) if fields.get("country") else ""
+    address_text = _norm(row.get("address"))
+
+    if actual_city:
+        city_ok = actual_city == target_city
+    else:
+        city_ok = bool(
+            target_city and re.search(rf"(?<![a-z]){re.escape(target_city)}(?![a-z])", address_text)
+        )
+    if not city_ok:
+        return False
+
+    if target_state:
+        if actual_state:
+            if actual_state != target_state:
+                return False
+        else:
+            state_full = US_STATE_NAMES.get(target_state, target_state)
+            if not re.search(
+                rf"(?<![a-z])(?:{re.escape(target_state)}|{re.escape(state_full)})(?![a-z])", address_text
+            ):
+                return False
+
+    if target_country and actual_country and actual_country != target_country:
+        return False
+
+    return True
+
+
 def run_gosom_search(keyword: str, city: str) -> list[dict]:
     query = f"{keyword} {city}"
 
@@ -130,11 +239,15 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
         )
 
         results = []
+        rejected = 0
         with open(results_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             if reader.fieldnames:
                 print(f"gosom CSV columns: {reader.fieldnames}", file=sys.stderr)
             for row in reader:
+                if not _matches_location(row, city):
+                    rejected += 1
+                    continue
                 results.append({
                     "name": _first_present(row, COLUMN_ALIASES["name"]),
                     "google_maps_url": _first_present(row, COLUMN_ALIASES["google_maps_url"]),
@@ -144,6 +257,10 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                     "phone": _first_present(row, COLUMN_ALIASES["phone"]),
                     "email": _first_present(row, COLUMN_ALIASES["email"], transform=_clean_email),
                 })
+        if rejected:
+            print(f"Rejected {rejected} result(s) outside requested location '{city}'", file=sys.stderr)
+        if not results and rejected:
+            print(f"No businesses matched the exact requested location '{city}'", file=sys.stderr)
         return [r for r in results if r["google_maps_url"]]
 
 
@@ -181,7 +298,7 @@ def save_results(keyword: str, city: str, results: list[dict]) -> int:
 
 def log_run(keyword: str, city: str, count: int, status: str = "success", error: str = None):
     client = get_client()
-    client.table("scrape_logs").insert({
+    payload = {
         "run_type": "discover",
         "keyword": keyword,
         "city": city,
@@ -189,13 +306,23 @@ def log_run(keyword: str, city: str, count: int, status: str = "success", error:
         "status": status,
         "error_message": error,
         "ran_at": datetime.now(timezone.utc).isoformat(),
-    }).execute()
+    }
+    try:
+        client.table("scrape_logs").insert(payload).execute()
+    except Exception as exc:
+        # Same stale-PostgREST-schema-cache issue as scan_reviews.py - a
+        # discover run finishing (or failing) must never itself throw just
+        # because the cache hasn't picked up the city column yet.
+        if "PGRST204" not in str(exc) or "city" not in str(exc):
+            raise
+        payload.pop("city", None)
+        client.table("scrape_logs").insert(payload).execute()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
-    parser.add_argument("--city", required=True)
+    parser.add_argument("--city", required=True, help="City, or 'City, State' / 'City, State, Country' for an exact scope")
     args = parser.parse_args()
 
     try:
