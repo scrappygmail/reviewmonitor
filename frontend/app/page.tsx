@@ -488,19 +488,13 @@ function DiscoverTab({
   }, []);
 
   // Whenever a job finishes (banner tells the parent, which bumps
-  // refreshKey), reload whichever search's results are on screen. If a
-  // search was actively being waited on, automatically show its negative
-  // reviews too - discovery now scans reviews as part of the same run, so
-  // there's no separate "click to scan, wait, click again to see
-  // negatives" dance anymore. One search = negatives shown, done.
+  // refreshKey), reload whichever search's results are on screen (and its
+  // negative reviews - loadSearchResults always does that now, see below).
   useEffect(() => {
     loadSavedSearches();
     (async () => {
       if (activeSearch) {
-        const rows = await loadSearchResults(activeSearch.keyword, activeSearch.city);
-        if (searching || showingNegatives) {
-          await loadNegativeReviewsFor(rows);
-        }
+        await loadSearchResults(activeSearch.keyword, activeSearch.city);
       }
       setSearching(false);
     })();
@@ -508,7 +502,9 @@ function DiscoverTab({
   }, [refreshKey]);
 
   // Arriving here from a "Recent activity" click on My Businesses -
-  // jump straight to that search's results.
+  // jump straight to that search's results (and its negatives - this used
+  // to land on what looked like a blank page here, since only the
+  // refreshKey path auto-showed negatives before).
   useEffect(() => {
     if (pendingSearch) {
       loadSearchResults(pendingSearch.keyword, pendingSearch.city);
@@ -522,7 +518,7 @@ function DiscoverTab({
   // effect fires one tick later), so the [refreshKey] effect above already
   // ran once with activeSearch still null and won't fire again on its
   // own. Watching activeSearch directly catches that restore and
-  // re-fetches its businesses.
+  // re-fetches its businesses (and negatives).
   useEffect(() => {
     if (activeSearch && results.length === 0 && !searching) {
       loadSearchResults(activeSearch.keyword, activeSearch.city);
@@ -583,16 +579,20 @@ function DiscoverTab({
     setStarting(false);
   }
 
+  // Loads a search's businesses AND its negative reviews together, every
+  // time, from every entry point (fresh search finishing, clicking a
+  // "Recent activity" row in My Businesses, a page-refresh restore, or
+  // clicking a saved-search pill) - there is no path anymore that lands
+  // on a business list without its negatives already showing.
   async function loadSearchResults(kw: string, cty: string): Promise<Business[]> {
     setActiveSearch({ keyword: kw, city: cty });
     setSearching(false);
-    setShowingNegatives(false);
-    setNegativeReviews([]);
     // ilike (no wildcards) = case-insensitive exact match, so "Plumber"
     // and "plumber" searches land in the same bucket.
     const { data } = await supabase.from("businesses").select("*").ilike("keyword", kw).ilike("city", cty);
     const rows = (data ?? []) as Business[];
     setResults(rows);
+    await loadNegativeReviewsFor(rows);
     return rows;
   }
 
@@ -620,13 +620,25 @@ function DiscoverTab({
   // that button/function is gone. If a search needs to be re-checked for
   // newer reviews later, re-running the same keyword+city search does it.
 
-  // Shows negative reviews already sitting in the database for the
-  // businesses currently on screen - this is fast (no scan triggered),
-  // since discovery itself now scans every business's reviews as part of
-  // the same run. Takes an explicit business list to avoid reading the
-  // (possibly stale) `results` state right after it was just set.
+  // Shows negative reviews already sitting in the database for the given
+  // businesses - this is fast (no scan triggered), since discovery itself
+  // now scans every business's reviews as part of the same run. Takes an
+  // explicit business list to avoid reading the (possibly stale) `results`
+  // state right after it was just set.
+  //
+  // A business can end up with several negative reviews saved across
+  // different scan sessions over time (each run only ever adds at most
+  // one new negative per business - see scan_reviews.py - but re-running
+  // the same search on a different day can find another). One business =
+  // one lead, so only the single most recent negative per business is
+  // kept here; reviews are already fetched newest-first, so the first
+  // one seen per business_id is the one to keep.
   async function loadNegativeReviewsFor(businesses: Business[]) {
-    if (businesses.length === 0) return;
+    if (businesses.length === 0) {
+      setNegativeReviews([]);
+      setShowingNegatives(false);
+      return;
+    }
     setLoadingNegatives(true);
     setShowingNegatives(true);
     const { data } = await supabase
@@ -638,7 +650,15 @@ function DiscoverTab({
       )
       .eq("is_negative", true)
       .order("review_date", { ascending: false });
-    setNegativeReviews((data ?? []) as Review[]);
+
+    const seenBusinesses = new Set<string>();
+    const deduped: Review[] = [];
+    for (const r of (data ?? []) as Review[]) {
+      if (seenBusinesses.has(r.business_id)) continue;
+      seenBusinesses.add(r.business_id);
+      deduped.push(r);
+    }
+    setNegativeReviews(deduped);
     setLoadingNegatives(false);
   }
 
@@ -789,9 +809,9 @@ function DiscoverTab({
               onClick={loadNegativeReviews}
               disabled={loadingNegatives || results.length === 0}
               className="text-xs font-semibold text-alert-600 border border-alert-400 rounded-full px-3 py-1.5 hover:bg-alert-50 focus-ring disabled:opacity-50"
-              title="Refresh negative reviews for these businesses"
+              title="Negatives already show automatically - this just re-checks for the latest"
             >
-              {loadingNegatives ? "Loading…" : "Show negative reviews"}
+              {loadingNegatives ? "Loading…" : "↻ Refresh negative reviews"}
             </button>
             <button
               onClick={clearResults}
