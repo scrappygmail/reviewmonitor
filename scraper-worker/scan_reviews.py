@@ -173,38 +173,53 @@ def scan_one_business(client, business: dict, scan_id: str) -> dict:
     return {"new_reviews": new_count, "negative": negative_count}
 
 
-def scan_many(business_list: list[dict], run_type: str, keyword: str = None, city: str = None) -> dict:
+def scan_many(
+    business_list: list[dict],
+    run_type: str,
+    keyword: str = None,
+    city: str = None,
+    existing_scan_id: str = None,
+) -> dict:
     """Scans a list of businesses ONE AT A TIME, syncing each to Supabase
     immediately - a timeout or crash partway through never loses already-
     completed businesses. Creates the scrape_logs row up front so every
     review can be tagged with this session's id, then updates that same
-    row with final counts/status once done."""
+    row with final counts/status once done.
+
+    existing_scan_id: pass this when the caller (discover.py) already
+    created the scrape_logs row itself - e.g. discovery finding
+    businesses and then immediately scanning their reviews now happens
+    as ONE combined run/one activity entry instead of two separate
+    steps, so there's no second row to create here."""
     client = get_client()
     total_new, total_negative, errors = 0, 0, 0
 
-    log_payload = {
-        "run_type": run_type,
-        "keyword": keyword,
-        "city": city,
-        "businesses_scanned": len(business_list),
-        "status": "running",
-        "ran_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        log_row = client.table("scrape_logs").insert(log_payload).execute()
-    except Exception as exc:
-        # If the migration that added scrape_logs.city was run recently,
-        # Supabase's PostgREST schema cache can take a while to notice the
-        # new column (it doesn't always refresh instantly on ALTER TABLE).
-        # Without this fallback, EVERY scan died right here before
-        # scanning business #1 - which is why "0 negative reviews" was
-        # showing up across every single search after that migration,
-        # not because of anything wrong with the scanning logic itself.
-        if "PGRST204" not in str(exc) or "city" not in str(exc):
-            raise
-        log_payload.pop("city", None)
-        log_row = client.table("scrape_logs").insert(log_payload).execute()
-    scan_id = log_row.data[0]["id"]
+    if existing_scan_id:
+        scan_id = existing_scan_id
+    else:
+        log_payload = {
+            "run_type": run_type,
+            "keyword": keyword,
+            "city": city,
+            "businesses_scanned": len(business_list),
+            "status": "running",
+            "ran_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            log_row = client.table("scrape_logs").insert(log_payload).execute()
+        except Exception as exc:
+            # If the migration that added scrape_logs.city was run recently,
+            # Supabase's PostgREST schema cache can take a while to notice the
+            # new column (it doesn't always refresh instantly on ALTER TABLE).
+            # Without this fallback, EVERY scan died right here before
+            # scanning business #1 - which is why "0 negative reviews" was
+            # showing up across every single search after that migration,
+            # not because of anything wrong with the scanning logic itself.
+            if "PGRST204" not in str(exc) or "city" not in str(exc):
+                raise
+            log_payload.pop("city", None)
+            log_row = client.table("scrape_logs").insert(log_payload).execute()
+        scan_id = log_row.data[0]["id"]
 
     try:
         start_job(run_type, total_count=len(business_list))
@@ -248,4 +263,4 @@ def scan_many(business_list: list[dict], run_type: str, keyword: str = None, cit
             print(f"Failed to send failure push notification: {push_err}")
 
     return {"scanned": len(business_list), "new_reviews": total_new,
-            "negative": total_negative, "errors": errors}
+            "negative": total_negative, "errors": errors, "scan_id": scan_id}

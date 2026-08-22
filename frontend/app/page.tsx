@@ -378,7 +378,16 @@ function JobStatusBanner({
   const pct = job!.total_count > 0 ? Math.round((job!.current_index / job!.total_count) * 100) : null;
   const mins = Math.floor(elapsed / 60);
   const secs = elapsed % 60;
-  const label = job!.job_type === "discover" ? "Searching…" : "Scanning reviews…";
+  // Once discovery finds businesses it immediately starts scanning their
+  // reviews too (same job_type="discover", total_count going from 0 to
+  // the actual business count is what marks that transition) - so the
+  // label switches instead of saying "Searching…" the entire time.
+  const label =
+    job!.job_type === "discover"
+      ? job!.total_count > 0
+        ? "Scanning reviews…"
+        : "Searching…"
+      : "Scanning reviews…";
 
   return (
     <div className="bg-brand-50 border border-brand-400 rounded-xl2 p-4 shadow-card flex items-center gap-4">
@@ -457,7 +466,6 @@ function DiscoverTab({
   // alone used to merge every city ever searched into one bucket.
   const [savedSearches, setSavedSearches] = useState<{ keyword: string; city: string }[]>([]);
   const [starting, setStarting] = useState(false);
-  const [scanStarting, setScanStarting] = useState(false);
 
   // "Show negative reviews" reads whatever has already been scanned for
   // these businesses (fast, no new job) - separate from "Scan all reviews
@@ -480,12 +488,22 @@ function DiscoverTab({
   }, []);
 
   // Whenever a job finishes (banner tells the parent, which bumps
-  // refreshKey), reload whichever search's results are on screen.
+  // refreshKey), reload whichever search's results are on screen. If a
+  // search was actively being waited on, automatically show its negative
+  // reviews too - discovery now scans reviews as part of the same run, so
+  // there's no separate "click to scan, wait, click again to see
+  // negatives" dance anymore. One search = negatives shown, done.
   useEffect(() => {
     loadSavedSearches();
-    if (activeSearch) loadSearchResults(activeSearch.keyword, activeSearch.city);
-    if (showingNegatives) loadNegativeReviews();
-    setSearching(false);
+    (async () => {
+      if (activeSearch) {
+        const rows = await loadSearchResults(activeSearch.keyword, activeSearch.city);
+        if (searching || showingNegatives) {
+          await loadNegativeReviewsFor(rows);
+        }
+      }
+      setSearching(false);
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshKey]);
 
@@ -565,7 +583,7 @@ function DiscoverTab({
     setStarting(false);
   }
 
-  async function loadSearchResults(kw: string, cty: string) {
+  async function loadSearchResults(kw: string, cty: string): Promise<Business[]> {
     setActiveSearch({ keyword: kw, city: cty });
     setSearching(false);
     setShowingNegatives(false);
@@ -573,7 +591,9 @@ function DiscoverTab({
     // ilike (no wildcards) = case-insensitive exact match, so "Plumber"
     // and "plumber" searches land in the same bucket.
     const { data } = await supabase.from("businesses").select("*").ilike("keyword", kw).ilike("city", cty);
-    setResults((data ?? []) as Business[]);
+    const rows = (data ?? []) as Business[];
+    setResults(rows);
+    return rows;
   }
 
   // Only clears what's on screen - saved businesses stay in the database.
@@ -595,29 +615,18 @@ function DiscoverTab({
     setResults((r) => r.map((b) => (b.id === id ? { ...b, monitored: !monitored } : b)));
   }
 
-  async function runProfessionScan(kw: string, cty: string) {
-    setScanStarting(true);
-    onStart();
-    try {
-      const res = await fetch("/api/profession-scan", {
-        method: "POST",
-        body: JSON.stringify({ keyword: kw, city: cty }),
-      });
-      const body = await res.json().catch(() => null);
-      if (!res.ok || body?.ok === false) {
-        alert(`Couldn't start the scan: ${body?.error ?? `server returned ${res.status}`}`);
-      }
-    } catch (e) {
-      alert(`Network error starting the scan: ${e}`);
-    }
-    setScanStarting(false);
-  }
+  // "Scan all reviews for negatives" used to be a separate manual step -
+  // discovery now does this automatically as part of one combined run, so
+  // that button/function is gone. If a search needs to be re-checked for
+  // newer reviews later, re-running the same keyword+city search does it.
 
   // Shows negative reviews already sitting in the database for the
-  // businesses currently on screen - does NOT trigger a new scan. Use
-  // "Scan all reviews for negatives" for that.
-  async function loadNegativeReviews() {
-    if (results.length === 0) return;
+  // businesses currently on screen - this is fast (no scan triggered),
+  // since discovery itself now scans every business's reviews as part of
+  // the same run. Takes an explicit business list to avoid reading the
+  // (possibly stale) `results` state right after it was just set.
+  async function loadNegativeReviewsFor(businesses: Business[]) {
+    if (businesses.length === 0) return;
     setLoadingNegatives(true);
     setShowingNegatives(true);
     const { data } = await supabase
@@ -625,12 +634,16 @@ function DiscoverTab({
       .select("*")
       .in(
         "business_id",
-        results.map((b) => b.id)
+        businesses.map((b) => b.id)
       )
       .eq("is_negative", true)
       .order("review_date", { ascending: false });
     setNegativeReviews((data ?? []) as Review[]);
     setLoadingNegatives(false);
+  }
+
+  async function loadNegativeReviews() {
+    await loadNegativeReviewsFor(results);
   }
 
   function downloadDiscoverNegativesCsv() {
@@ -685,8 +698,9 @@ function DiscoverTab({
       <div className="bg-surface border border-line rounded-xl2 p-5 shadow-card">
         <h2 className="font-display font-bold text-lg mb-1">Find businesses</h2>
         <p className="text-sm text-muted mb-4">
-          Search a profession and area. For ambiguous cities, include state/country (e.g. "Rome, GA"). Results
-          are saved permanently — add the ones you want to watch.
+          Search a profession and area — this finds businesses AND checks their reviews for negatives in one
+          go, no extra step. For ambiguous cities, include state/country (e.g. "Rome, GA"). Results are saved
+          permanently.
         </p>
         <div className="flex flex-col sm:flex-row gap-3">
           <input
@@ -751,15 +765,22 @@ function DiscoverTab({
           <div>
             {searching ? (
               <span className="text-sm text-muted flex items-center">
-                Searching for <strong className="text-ink mx-1">{activeSearch.keyword} — {activeSearch.city}</strong>
+                Finding businesses and checking their reviews for{" "}
+                <strong className="text-ink mx-1">{activeSearch.keyword} — {activeSearch.city}</strong>
                 <LoadingDots />
               </span>
             ) : (
               <span className="text-sm text-muted">
-                {results.length} results for{" "}
+                {results.length} businesses found for{" "}
                 <strong className="text-ink">
                   {activeSearch.keyword} — {activeSearch.city}
                 </strong>
+                {showingNegatives && !loadingNegatives && (
+                  <>
+                    {" "}
+                    · <strong className="text-alert-600">{negativeReviews.length} negative</strong>
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -768,17 +789,9 @@ function DiscoverTab({
               onClick={loadNegativeReviews}
               disabled={loadingNegatives || results.length === 0}
               className="text-xs font-semibold text-alert-600 border border-alert-400 rounded-full px-3 py-1.5 hover:bg-alert-50 focus-ring disabled:opacity-50"
-              title="Shows negative reviews already scanned for these businesses - no new scan"
+              title="Refresh negative reviews for these businesses"
             >
               {loadingNegatives ? "Loading…" : "Show negative reviews"}
-            </button>
-            <button
-              onClick={() => runProfessionScan(activeSearch.keyword, activeSearch.city)}
-              disabled={scanStarting || searching}
-              className="text-xs font-semibold text-brand-600 border border-brand-400 rounded-full px-3 py-1.5 hover:bg-brand-50 focus-ring disabled:opacity-50"
-              title="Starts a new scan of every business's reviews - takes a while"
-            >
-              {scanStarting ? "Starting…" : "Scan all reviews for negatives →"}
             </button>
             <button
               onClick={clearResults}
@@ -797,10 +810,10 @@ function DiscoverTab({
               <div className="text-sm font-semibold text-alert-600">
                 {loadingNegatives
                   ? "Loading…"
-                  : `${negativeReviews.length} negative review${negativeReviews.length === 1 ? "" : "s"} found so far`}
+                  : `${negativeReviews.length} negative review${negativeReviews.length === 1 ? "" : "s"}`}
               </div>
               <div className="text-xs text-muted">
-                From reviews already scanned for these businesses — run a scan above to check for more.
+                Every business found above was scanned automatically — this is all of it.
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -822,8 +835,7 @@ function DiscoverTab({
           </div>
           {!loadingNegatives && negativeReviews.length === 0 && (
             <p className="text-sm text-muted">
-              No negative reviews found yet — click &quot;Scan all reviews for negatives&quot; above to check
-              these businesses.
+              No negative reviews found among these businesses. Re-run the same search later to check again.
             </p>
           )}
           <div className="grid gap-3">
@@ -1217,7 +1229,7 @@ function MyBusinessesTab({
                     </button>
                   )}
                   <span>{timeAgo(log.ran_at)}</span>
-                  {log.run_type !== "discover" && log.negative_reviews_found > 0 && (
+                  {log.negative_reviews_found > 0 && (
                     <button
                       onClick={(e) => downloadRunCsv(log, e)}
                       disabled={exportingRunId === log.id}
@@ -1339,7 +1351,7 @@ function MyBusinessesTab({
                           review{groupShown.length === 1 ? "" : "s"}
                         </div>
                       </div>
-                      {g.log && g.log.run_type !== "discover" && (
+                      {g.log && (
                         <button
                           onClick={(e) => downloadRunCsv(g.log!, e)}
                           disabled={exportingRunId === g.log.id}

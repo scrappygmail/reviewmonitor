@@ -13,7 +13,10 @@ on:
 jobs:
   discover:
     runs-on: ubuntu-latest   # comes with Docker pre-installed
-    timeout-minutes: 55   # bumped from 30 - email extraction (-email flag) takes noticeably longer
+    # Bumped way up (was 55) - this run now finds businesses AND scans all
+    # of their reviews for negatives in one shot, instead of requiring a
+    # separate manual "Scan all reviews" step afterwards.
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v5
 
@@ -27,7 +30,12 @@ jobs:
       - name: Pull the discovery engine image
         run: docker pull gosom/google-maps-scraper
 
-      - name: Run discovery
+      - name: Clone the review-scraping engine
+        run: |
+          git clone --depth 1 https://github.com/georgekhananaev/google-reviews-scraper-pro.git engine
+          pip install -r engine/requirements.txt
+
+      - name: Run discovery + review scan
         working-directory: scraper-worker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -35,4 +43,5 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_CONTACT_EMAIL: ${{ secrets.VAPID_CONTACT_EMAIL }}
+          SCRAPER_ENGINE_DIR: ${{ github.workspace }}/engine
         run: python discover.py --keyword "${{ github.event.inputs.keyword }}" --city "${{ github.event.inputs.city }}"

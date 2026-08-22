@@ -23,8 +23,9 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from db import get_client
-from notify_push import notify_scan_failed
+from notify_push import notify_scan_failed, notify_new_negative_reviews
 from job_status import start_job, update_progress, finish_job
+from scan_reviews import scan_many
 
 COLUMN_ALIASES = {
     "name": ["title", "name"],
@@ -264,9 +265,11 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
         return [r for r in results if r["google_maps_url"]]
 
 
-def save_results(keyword: str, city: str, results: list[dict]) -> int:
+def save_results(keyword: str, city: str, results: list[dict]) -> list[dict]:
+    """Saves discovered businesses and returns the saved rows (with their
+    real database ids), so the caller can hand them straight to
+    scan_many() for review scanning without a second round trip."""
     client = get_client()
-    saved = 0
     for r in results:
         row = {
             "name": r.get("name") or "Unknown",
@@ -292,11 +295,14 @@ def save_results(keyword: str, city: str, results: list[dict]) -> int:
             existing = client.table("businesses").select("id").eq("google_maps_url", row["google_maps_url"]).execute()
             if not existing.data:
                 client.table("businesses").insert(row).execute()
-        saved += 1
-    return saved
+
+    # ilike (case-insensitive exact match) so this picks up everything
+    # under this keyword+city regardless of how it was capitalized before.
+    saved = client.table("businesses").select("*").ilike("keyword", keyword).ilike("city", city).execute()
+    return saved.data or []
 
 
-def log_run(keyword: str, city: str, count: int, status: str = "success", error: str = None):
+def log_run(keyword: str, city: str, count: int, status: str = "success", error: str = None) -> str:
     client = get_client()
     payload = {
         "run_type": "discover",
@@ -308,7 +314,7 @@ def log_run(keyword: str, city: str, count: int, status: str = "success", error:
         "ran_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        client.table("scrape_logs").insert(payload).execute()
+        row = client.table("scrape_logs").insert(payload).execute()
     except Exception as exc:
         # Same stale-PostgREST-schema-cache issue as scan_reviews.py - a
         # discover run finishing (or failing) must never itself throw just
@@ -316,7 +322,8 @@ def log_run(keyword: str, city: str, count: int, status: str = "success", error:
         if "PGRST204" not in str(exc) or "city" not in str(exc):
             raise
         payload.pop("city", None)
-        client.table("scrape_logs").insert(payload).execute()
+        row = client.table("scrape_logs").insert(payload).execute()
+    return row.data[0]["id"]
 
 
 def main():
@@ -331,17 +338,49 @@ def main():
     except Exception as e:
         print(f"Failed to start job status tracking: {e}")
 
+    scan_id = None
     try:
         results = run_gosom_search(args.keyword, args.city)
-        count = save_results(args.keyword, args.city, results)
-        log_run(args.keyword, args.city, count)
-        print(f"Discovery done: {count} businesses saved for '{args.keyword}' in '{args.city}'")
-        try:
-            finish_job("done")
-        except Exception as e:
-            print(f"Failed to finish job status tracking: {e}")
+        saved_businesses = save_results(args.keyword, args.city, results)
+        # Row starts as "running" - it doesn't flip to a real final status
+        # until the review-scanning phase below finishes too, since this
+        # is now ONE combined run (find businesses AND scan their reviews),
+        # not two separate steps the user has to trigger by hand.
+        scan_id = log_run(args.keyword, args.city, len(saved_businesses), status="running")
+        print(f"Discovery done: {len(saved_businesses)} businesses saved for '{args.keyword}' in '{args.city}'")
+
+        if saved_businesses:
+            summary = scan_many(
+                saved_businesses,
+                run_type="discover",
+                keyword=args.keyword,
+                city=args.city,
+                existing_scan_id=scan_id,
+            )
+            print(f"Review scan done: {summary}")
+            if summary["negative"] > 0:
+                try:
+                    notify_new_negative_reviews()
+                except Exception as push_err:
+                    print(f"Failed to send negative-review push notification: {push_err}")
+        else:
+            client = get_client()
+            client.table("scrape_logs").update({"status": "success"}).eq("id", scan_id).execute()
+            try:
+                finish_job("done")
+            except Exception as e:
+                print(f"Failed to finish job status tracking: {e}")
     except Exception as e:
-        log_run(args.keyword, args.city, 0, status="failed", error=str(e))
+        if scan_id:
+            try:
+                client = get_client()
+                client.table("scrape_logs").update(
+                    {"status": "failed", "error_message": str(e)}
+                ).eq("id", scan_id).execute()
+            except Exception as log_err:
+                print(f"Failed to mark run as failed: {log_err}")
+        else:
+            log_run(args.keyword, args.city, 0, status="failed", error=str(e))
         try:
             finish_job("failed")
         except Exception as job_err:
