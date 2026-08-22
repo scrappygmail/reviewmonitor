@@ -16,7 +16,11 @@ jobs:
     # Bumped way up (was 55) - this run now finds businesses AND scans all
     # of their reviews for negatives in one shot, instead of requiring a
     # separate manual "Scan all reviews" step afterwards.
-    timeout-minutes: 300
+    # Internal 25-min budget in scan_reviews.py's scan_many() is what
+    # actually caps how long the scan phase runs (and always saves partial
+    # results if it's hit) - this is just an outer safety net for setup +
+    # discovery + that budget + a bit of buffer, not the real limit.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 

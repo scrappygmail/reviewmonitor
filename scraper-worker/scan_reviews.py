@@ -20,9 +20,11 @@ This only DRIVES the engine via config.yaml + its own `python start.py`
 CLI - none of its internals are touched.
 """
 import os
+import signal
 import sqlite3
 import subprocess
 import json
+import time
 import yaml
 from datetime import datetime, timezone, timedelta
 from db import get_client
@@ -35,8 +37,31 @@ DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 
 PER_BUSINESS_TIMEOUT_SECONDS = 8 * 60  # a single stuck business can't eat the whole job
 
+# Hard internal cap on the WHOLE scan_many() run, checked between
+# businesses. Never rely on GitHub Actions' own timeout-minutes to enforce
+# a time limit - that just SIGKILLs the process with zero chance to save
+# anything, which is exactly the "83 minutes then nothing" problem this
+# fixes. This way a run always finishes cleanly and reports whatever it
+# found so far, instead of running long or getting cut off mid-write.
+TIME_BUDGET_SECONDS = 25 * 60
 
 SCAN_WINDOW_DAYS = 90
+
+# Set by the "Stop" button (cancel.js cancels the GitHub Actions run,
+# which sends SIGTERM to this process) - checked between businesses so a
+# stop always wraps up with partial results saved, never just dies
+# mid-write and leaves the run stuck at "running" forever.
+_stop_requested = False
+
+
+def _handle_stop_signal(signum, _frame):
+    global _stop_requested
+    _stop_requested = True
+    print(f"Received signal {signum} - finishing the current business, then stopping with partial results saved.")
+
+
+signal.signal(signal.SIGTERM, _handle_stop_signal)
+signal.signal(signal.SIGINT, _handle_stop_signal)
 
 
 def _write_config(business: dict):
@@ -51,7 +76,12 @@ def _write_config(business: dict):
         "download_images": False,
         "use_mongodb": False,
         "log_level": "INFO",
-        "max_reviews": 100,
+        # Reviews are sorted newest-first with early_stop past the 90-day
+        # window below, so if a business has any recent negative review
+        # it'll be near the top - 20 is plenty to catch it without paying
+        # for up to 100 reviews per business when we only need to know
+        # "is there at least one negative", not a full history.
+        "max_reviews": 20,
         "date_filter": {
             "after": window_start,
             "mode": "early_stop",
@@ -126,7 +156,12 @@ def _sync_reviews(client, reviews: list[dict], scan_id: str) -> tuple[int, int]:
     """Inserts genuinely new reviews into Supabase, tagged with the
     session (scan_id) that found them. Already-known reviews are left
     untouched entirely - no write, no overwriting their original scan_id
-    with a later run's id. Returns (new_count, negative_count)."""
+    with a later run's id.
+
+    Stops as soon as ONE new negative review has been synced for this
+    business - one negative is enough to flag it as a lead, no need to
+    keep writing the rest of its (already-fetched) reviews. Returns
+    (new_count, negative_count)."""
     new_count, negative_count = 0, 0
     for r in reviews:
         if r["rating"] is None:
@@ -155,6 +190,7 @@ def _sync_reviews(client, reviews: list[dict], scan_id: str) -> tuple[int, int]:
         new_count += 1
         if r["rating"] <= 3:
             negative_count += 1
+            break  # got this business's lead - move on to the next business
     return new_count, negative_count
 
 
@@ -192,7 +228,9 @@ def scan_many(
     as ONE combined run/one activity entry instead of two separate
     steps, so there's no second row to create here."""
     client = get_client()
-    total_new, total_negative, errors = 0, 0, 0
+    total_new, total_negative, errors, skipped = 0, 0, 0, 0
+    stopped_early = False
+    start_time = time.monotonic()
 
     if existing_scan_id:
         scan_id = existing_scan_id
@@ -227,6 +265,20 @@ def scan_many(
         print(f"Failed to start job status tracking: {e}")
 
     for i, biz in enumerate(business_list, start=1):
+        if _stop_requested:
+            print("Stop button pressed - wrapping up now with results found so far, not discarding them.")
+            stopped_early = True
+            skipped = len(business_list) - i + 1
+            break
+        if time.monotonic() - start_time > TIME_BUDGET_SECONDS:
+            print(
+                f"Hit the {TIME_BUDGET_SECONDS // 60}-minute time budget after {i - 1} business(es) - "
+                f"wrapping up with results found so far instead of running long."
+            )
+            stopped_early = True
+            skipped = len(business_list) - i + 1
+            break
+
         print(f"--- Scanning {i}/{len(business_list)}: {biz['name']} ---")
         try:
             update_progress(i, biz["name"])
@@ -243,7 +295,14 @@ def scan_many(
             errors += 1
             print(f"Failed scraping {biz['name']}: {e}")
 
-    status = "success" if errors == 0 else ("partial" if total_new or total_negative else "failed")
+    if stopped_early:
+        status = "partial"
+    elif errors == 0:
+        status = "success"
+    elif total_new or total_negative:
+        status = "partial"
+    else:
+        status = "failed"
 
     client.table("scrape_logs").update({
         "new_reviews_found": total_new,
@@ -262,5 +321,12 @@ def scan_many(
         except Exception as push_err:
             print(f"Failed to send failure push notification: {push_err}")
 
-    return {"scanned": len(business_list), "new_reviews": total_new,
-            "negative": total_negative, "errors": errors, "scan_id": scan_id}
+    return {
+        "scanned": len(business_list) - skipped,
+        "skipped": skipped,
+        "new_reviews": total_new,
+        "negative": total_negative,
+        "errors": errors,
+        "scan_id": scan_id,
+        "stopped_early": stopped_early,
+    }

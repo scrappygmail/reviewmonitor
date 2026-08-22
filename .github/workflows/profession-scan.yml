@@ -13,7 +13,10 @@ on:
 jobs:
   profession-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    # Internal 25-min budget in scan_reviews.py's scan_many() is what
+    # actually caps how long this runs (and always saves partial results
+    # if it's hit) - this is just an outer safety net, not the real limit.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 

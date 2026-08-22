@@ -843,7 +843,7 @@ function DiscoverTab({
               const biz = resultsLookup[r.business_id];
               return (
                 <div key={r.id} className="bg-surface border border-line rounded-xl2 p-4 shadow-card">
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between mb-1 gap-2">
                     {biz ? (
                       <a
                         href={biz.google_maps_url}
@@ -856,8 +856,24 @@ function DiscoverTab({
                     ) : (
                       <span className="font-semibold text-sm text-muted">Unknown business</span>
                     )}
-                    <RatingBadge rating={r.rating} />
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <RatingBadge rating={r.rating} />
+                      {biz && (
+                        <button
+                          onClick={() => toggleMonitored(biz.id, biz.monitored)}
+                          className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-sm focus-ring ${
+                            biz.monitored
+                              ? "bg-brand-50 text-brand-600 border border-brand-400"
+                              : "bg-brand-500 text-white hover:bg-brand-600"
+                          }`}
+                          title={biz.monitored ? "Already in watch list" : "Add to watch list"}
+                        >
+                          {biz.monitored ? "✓" : "+"}
+                        </button>
+                      )}
+                    </div>
                   </div>
+                  {biz?.phone && <div className="text-xs text-muted mb-1">📞 {biz.phone}</div>}
                   {formatAddress(biz?.address) && <div className="text-xs text-muted mb-1">{formatAddress(biz.address)}</div>}
                   <p className="text-sm text-muted">{r.review_text}</p>
                   <div className="text-xs text-muted mt-2">
@@ -869,34 +885,6 @@ function DiscoverTab({
           </div>
         </div>
       )}
-
-      <div className="grid gap-3">
-        {results.map((b) => (
-          <div
-            key={b.id}
-            className="bg-surface border border-line rounded-xl2 p-4 shadow-card flex items-center justify-between"
-          >
-            <div>
-              <div className="font-semibold text-sm">{b.name}</div>
-              <div className="text-xs text-muted mt-0.5">
-                {formatAddress(b.address)} {b.rating ? `· ★ ${b.rating}` : ""}
-              </div>
-              {b.phone && <div className="text-xs text-muted mt-0.5">📞 {b.phone}</div>}
-            </div>
-            <button
-              onClick={() => toggleMonitored(b.id, b.monitored)}
-              className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-lg focus-ring ${
-                b.monitored
-                  ? "bg-brand-50 text-brand-600 border border-brand-400"
-                  : "bg-brand-500 text-white hover:bg-brand-600"
-              }`}
-              title={b.monitored ? "Already in watch list" : "Add to watch list"}
-            >
-              {b.monitored ? "✓" : "+"}
-            </button>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
