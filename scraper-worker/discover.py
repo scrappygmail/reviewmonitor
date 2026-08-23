@@ -405,9 +405,6 @@ def log_run(keyword: str, city: str, count: int, status: str = "success", error:
 
 
 def main():
-    job_start_time = time.monotonic()  # covers setup + gosom discovery + scanning, all of it -
-                                        # passed to scan_many() so its 20-min budget accounts for
-                                        # the WHOLE run, not just the time since scanning started.
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
     parser.add_argument("--city", required=True, help="City, or 'City, State' / 'City, State, Country' for an exact scope")
@@ -453,13 +450,27 @@ def main():
             )
 
         if businesses_to_scan:
+            # job_start_time captured HERE, right before scanning begins -
+            # not at the very top of main(). A real run showed gosom's own
+            # discovery + email-extraction phase (-email flag visits every
+            # business's website, and 100+ businesses with slow/unresponsive
+            # sites adds up fast) can itself take 20+ minutes for a big
+            # city+keyword search. Counting the 25-min scan budget from
+            # script start meant that phase alone could eat almost the
+            # whole budget, leaving the actual review-scanning - the part
+            # that finds negatives - only 1-2 businesses' worth of time
+            # before "wrapping up early" kicked in. The scan phase now
+            # always gets its own full 25 minutes, regardless of how long
+            # discovery took; the workflow's outer timeout-minutes was
+            # bumped up accordingly to give enough total room for both.
+            scan_start_time = time.monotonic()
             summary = scan_many(
                 businesses_to_scan,
                 run_type="discover",
                 keyword=args.keyword,
                 city=args.city,
                 existing_scan_id=scan_id,
-                job_start_time=job_start_time,
+                job_start_time=scan_start_time,
             )
             print(f"Review scan done: {summary}")
             if summary["negative"] > 0:

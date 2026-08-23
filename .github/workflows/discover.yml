@@ -16,11 +16,14 @@ jobs:
     # Bumped way up (was 55) - this run now finds businesses AND scans all
     # of their reviews for negatives in one shot, instead of requiring a
     # separate manual "Scan all reviews" step afterwards.
-    # Internal 25-min budget in scan_reviews.py's scan_many() is what
-    # actually caps how long the scan phase runs (and always saves partial
-    # results if it's hit) - this is just an outer safety net for setup +
-    # discovery + that budget + a bit of buffer, not the real limit.
-    timeout-minutes: 40
+    # Discovery itself (gosom, especially with -email on a large result
+    # set) is internally capped at 50 min (see discover.py's subprocess
+    # timeout). The review-scan phase now always gets its own dedicated
+    # 25-min budget on top of that, regardless of how long discovery took
+    # (see the job_start_time comment in discover.py's main() for why).
+    # This ceiling covers the realistic worst case of both back to back
+    # plus setup overhead - it's a safety net, not the expected runtime.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
 

@@ -61,6 +61,7 @@ See [`SETUP.md`](./SETUP.md) for a full step-by-step deployment guide — Supaba
 ## What's new
 
 - **Skips businesses that could never have a negative review.** gosom's own search results include a rating breakdown per business (how many 1-star, 2-star, etc. reviews it has, all-time). If that breakdown shows zero 1-3 star reviews ever, the business is skipped entirely for the (slow, ~90s) review scan — it certainly can't have a negative in just the last 90 days if it's never had one at all. Any uncertainty (missing/unparseable data) defaults to scanning it anyway, so this only ever skips businesses it's fully confident about, never a real lead. Tested against 13 different data-shape scenarios (clean, has negatives, malformed, missing, wrong types) before shipping.
+- **Fixed the review-scan budget getting eaten by discovery itself.** A real run on 116 businesses (Cleaner, New Jersey) showed discovery + email extraction (-email visits every business's website) taking 20+ minutes on its own for a big search - and since the 25-min scan budget was measured from the very start of the script, only ~1-2 minutes were left for the part that actually finds negatives, so only 2 of 77 candidate businesses ever got scanned. The scan phase now gets its own fresh 25-minute budget starting right when it begins, no matter how long discovery took. Workflow timeout-minutes bumped to 90 to comfortably cover the realistic worst case of a long discovery phase plus a full 25-min scan back to back.
 
 A few small additions on top of the original build:
 
