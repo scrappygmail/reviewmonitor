@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from db import get_client
 from notify_push import notify_scan_failed, notify_new_negative_reviews
@@ -327,6 +328,9 @@ def log_run(keyword: str, city: str, count: int, status: str = "success", error:
 
 
 def main():
+    job_start_time = time.monotonic()  # covers setup + gosom discovery + scanning, all of it -
+                                        # passed to scan_many() so its 20-min budget accounts for
+                                        # the WHOLE run, not just the time since scanning started.
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
     parser.add_argument("--city", required=True, help="City, or 'City, State' / 'City, State, Country' for an exact scope")
@@ -356,6 +360,7 @@ def main():
                 keyword=args.keyword,
                 city=args.city,
                 existing_scan_id=scan_id,
+                job_start_time=job_start_time,
             )
             print(f"Review scan done: {summary}")
             if summary["negative"] > 0:

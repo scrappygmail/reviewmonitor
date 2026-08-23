@@ -35,15 +35,22 @@ SCRAPER_DIR = os.environ.get("SCRAPER_ENGINE_DIR", "./google-reviews-scraper-pro
 CONFIG_PATH = os.path.join(SCRAPER_DIR, "config.yaml")
 DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 
-PER_BUSINESS_TIMEOUT_SECONDS = 8 * 60  # a single stuck business can't eat the whole job
+PER_BUSINESS_TIMEOUT_SECONDS = 90  # was 8 min - if a business isn't done in
+# 90s (with a light ~10-review request), it's almost always Google
+# rate-limiting/blocking the headless browser (no proxies configured), not
+# something that finishing the wait would fix. A handful of businesses
+# hitting the OLD 8-min cap was enough to burn 30-40+ minutes on their own -
+# this was the single biggest cause of slow runs, not the review-checking
+# logic itself.
 
-# Hard internal cap on the WHOLE scan_many() run, checked between
+# Hard internal cap on the WHOLE run (discovery + scanning together, once
+# job_start_time is threaded through from discover.py), checked between
 # businesses. Never rely on GitHub Actions' own timeout-minutes to enforce
 # a time limit - that just SIGKILLs the process with zero chance to save
 # anything, which is exactly the "83 minutes then nothing" problem this
 # fixes. This way a run always finishes cleanly and reports whatever it
 # found so far, instead of running long or getting cut off mid-write.
-TIME_BUDGET_SECONDS = 25 * 60
+TIME_BUDGET_SECONDS = 20 * 60
 
 SCAN_WINDOW_DAYS = 90
 
@@ -78,10 +85,13 @@ def _write_config(business: dict):
         "log_level": "INFO",
         # Reviews are sorted newest-first with early_stop past the 90-day
         # window below, so if a business has any recent negative review
-        # it'll be near the top - 20 is plenty to catch it without paying
-        # for up to 100 reviews per business when we only need to know
-        # "is there at least one negative", not a full history.
-        "max_reviews": 20,
+        # it'll be near the top. This only needs to be big enough to
+        # answer "is there at least one negative" - it does NOT save any
+        # time to stop early mid-scrape once one is found, because the
+        # engine returns its whole batch in one shot (see the note on
+        # scan_one_business below), so the real lever for speed is
+        # keeping this number small in the first place.
+        "max_reviews": 10,
         "date_filter": {
             "after": window_start,
             "mode": "early_stop",
@@ -196,7 +206,20 @@ def _sync_reviews(client, reviews: list[dict], scan_id: str) -> tuple[int, int]:
 
 def scan_one_business(client, business: dict, scan_id: str) -> dict:
     """Scrapes and syncs a single business. Raises on scrape failure so the
-    caller can log it and move on to the next business."""
+    caller can move on to the next business.
+
+    IMPORTANT limitation: _run_scraper() launches the review-scraping
+    engine as a whole separate process (browser launch, page navigation,
+    scrolling to load reviews) and only returns control once it's
+    completely done - there's no way to peek at reviews as they're found
+    and bail out mid-scrape the moment a negative shows up. The "stop
+    after first negative" logic in _sync_reviews() only skips WRITING the
+    rest of an already-fully-scraped batch to Supabase - it does not (and
+    structurally can't, without patching the engine itself) shorten the
+    scrape time for that business. The real levers for speed here are
+    max_reviews (how much the engine has to scroll/load per business) and
+    PER_BUSINESS_TIMEOUT_SECONDS (how long a stuck/blocked business is
+    allowed to hang before giving up on it)."""
     _write_config(business)
     _run_scraper()
     reviews = _read_reviews_from_sqlite(business["id"])
@@ -215,6 +238,7 @@ def scan_many(
     keyword: str = None,
     city: str = None,
     existing_scan_id: str = None,
+    job_start_time: float = None,
 ) -> dict:
     """Scans a list of businesses ONE AT A TIME, syncing each to Supabase
     immediately - a timeout or crash partway through never loses already-
@@ -226,11 +250,18 @@ def scan_many(
     created the scrape_logs row itself - e.g. discovery finding
     businesses and then immediately scanning their reviews now happens
     as ONE combined run/one activity entry instead of two separate
-    steps, so there's no second row to create here."""
+    steps, so there's no second row to create here.
+
+    job_start_time: time.monotonic() captured at the very start of the
+    WHOLE run (e.g. before gosom's own discovery phase in discover.py),
+    not just when this function was called. The 25-minute budget below
+    needs to cover total wall time for the run to reliably finish before
+    GitHub Actions' own outer timeout hard-kills it (which saves nothing) -
+    if this isn't passed, it falls back to timing from here instead."""
     client = get_client()
     total_new, total_negative, errors, skipped = 0, 0, 0, 0
     stopped_early = False
-    start_time = time.monotonic()
+    start_time = job_start_time if job_start_time is not None else time.monotonic()
 
     if existing_scan_id:
         scan_id = existing_scan_id
