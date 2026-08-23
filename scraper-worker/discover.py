@@ -253,16 +253,14 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
         )
 
         results = []
+        all_results = []
         rejected = 0
         with open(results_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             if reader.fieldnames:
                 print(f"gosom CSV columns: {reader.fieldnames}", file=sys.stderr)
             for row in reader:
-                if not _matches_location(row, city):
-                    rejected += 1
-                    continue
-                results.append({
+                parsed = {
                     "name": _first_present(row, COLUMN_ALIASES["name"]),
                     "google_maps_url": _first_present(row, COLUMN_ALIASES["google_maps_url"]),
                     "place_id": _first_present(row, COLUMN_ALIASES["place_id"]),
@@ -270,11 +268,36 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                     "rating": _to_float(_first_present(row, COLUMN_ALIASES["rating"])),
                     "phone": _first_present(row, COLUMN_ALIASES["phone"]),
                     "email": _first_present(row, COLUMN_ALIASES["email"], transform=_clean_email),
-                })
+                }
+                all_results.append(parsed)
+                if _matches_location(row, city):
+                    results.append(parsed)
+                else:
+                    rejected += 1
+
         if rejected:
             print(f"Rejected {rejected} result(s) outside requested location '{city}'", file=sys.stderr)
-        if not results and rejected:
-            print(f"No businesses matched the exact requested location '{city}'", file=sys.stderr)
+
+        # Safety net: the location filter's job is to catch genuinely wrong
+        # results (e.g. a "Rome" search returning a business in a totally
+        # different state) - it is NOT supposed to be able to wipe out an
+        # entire real search. If it rejects EVERYTHING, that's a much
+        # stronger signal that the filter itself doesn't understand how
+        # this location is labeled (this has now happened for both
+        # "Universal City San Antonio" and "New York" - Google reports NYC
+        # addresses by borough, not "New York") than that gosom returned
+        # 100% garbage. Falling back to keeping everything gosom found
+        # means a slightly-imprecise result set at worst, instead of a
+        # completely empty, useless one.
+        if not results and all_results:
+            print(
+                f"Location filter rejected ALL {len(all_results)} result(s) for '{city}' - this is almost "
+                f"always a filter/naming mismatch, not bad data from gosom. Keeping all of them rather than "
+                f"saving zero.",
+                file=sys.stderr,
+            )
+            results = all_results
+
         return [r for r in results if r["google_maps_url"]]
 
 
