@@ -543,13 +543,15 @@ function DiscoverTab({
   }
 
   async function runDiscovery() {
-    if (!keyword || !city) return;
+    const trimmedKeyword = keyword.trim();
+    const trimmedCity = city.trim();
+    if (!trimmedKeyword || !trimmedCity) return;
     setStarting(true);
     onStart();
     try {
       const res = await fetch("/api/discover", {
         method: "POST",
-        body: JSON.stringify({ keyword, city }),
+        body: JSON.stringify({ keyword: trimmedKeyword, city: trimmedCity }),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok || body?.ok === false) {
@@ -568,7 +570,7 @@ function DiscoverTab({
     // Optimistically switch to this search's results view - the
     // JobStatusBanner above will show live progress, and results appear
     // here automatically once the job finishes (via refreshKey).
-    setActiveSearch({ keyword, city });
+    setActiveSearch({ keyword: trimmedKeyword, city: trimmedCity });
     setResults([]);
     setSearching(true);
     setShowingNegatives(false);

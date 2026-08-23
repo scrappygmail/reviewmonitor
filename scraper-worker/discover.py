@@ -174,6 +174,7 @@ def _matches_location(row: dict, location: str) -> bool:
     """Prefers the structured complete_address fields; falls back to a
     word-boundary regex match against the plain address text when those
     aren't present for a given business."""
+    target_full = _norm(location)
     target_city, target_state, target_country = _parse_location_scope(location)
     fields = _complete_address_fields(row.get("complete_address"))
     actual_city = _norm(fields.get("city"))
@@ -182,7 +183,18 @@ def _matches_location(row: dict, location: str) -> bool:
     address_text = _norm(row.get("address"))
 
     if actual_city:
-        city_ok = actual_city == target_city
+        # Lenient match: accept if the precise structured city name is
+        # contained anywhere in what the user actually typed (or vice
+        # versa) - NOT strict equality. A comma-less, multi-word input
+        # like "Universal City San Antonio" (a very normal way to type a
+        # city + a nearby-city hint, with no state given) used to get
+        # treated as one single target city string "universal city san
+        # antonio", which could never equal the real city "universal
+        # city" - rejecting every single legitimate result. Substring
+        # matching handles that naturally while still rejecting genuinely
+        # different cities (e.g. "cheyenne" is not contained in and does
+        # not contain "rome").
+        city_ok = actual_city in target_full or target_city in actual_city or target_full in actual_city
     else:
         city_ok = bool(
             target_city and re.search(rf"(?<![a-z]){re.escape(target_city)}(?![a-z])", address_text)
@@ -335,6 +347,8 @@ def main():
     parser.add_argument("--keyword", required=True)
     parser.add_argument("--city", required=True, help="City, or 'City, State' / 'City, State, Country' for an exact scope")
     args = parser.parse_args()
+    args.keyword = args.keyword.strip()
+    args.city = args.city.strip()
 
     try:
         start_job("discover", total_count=0)
