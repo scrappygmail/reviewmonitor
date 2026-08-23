@@ -42,6 +42,39 @@ COLUMN_ALIASES = {
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 
+def _has_confirmed_no_negative_history(raw: str | None) -> bool:
+    """True ONLY when gosom's own reviews_per_rating breakdown clearly
+    shows zero 1-3 star reviews EVER for this business - if it never had
+    a negative review in its whole history, it certainly doesn't have one
+    in the last 90 days either, so the slow (~90s) per-business review
+    scan can be skipped entirely for it.
+
+    Any uncertainty (missing field, unexpected format, unparseable count)
+    returns False - i.e. scan it anyway. Skipping a business that might
+    actually have had a negative would mean missing a real lead, which is
+    worse than one extra scan that turns up nothing."""
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw.strip())
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(parsed, dict) or not parsed:
+        return False
+    negative_total = 0
+    for key, count in parsed.items():
+        star_match = re.search(r"\d", str(key))
+        if not star_match:
+            return False  # unrecognized key shape - don't trust this row, scan it
+        try:
+            count_val = int(count)
+        except (ValueError, TypeError):
+            return False
+        if int(star_match.group()) <= 3:
+            negative_total += count_val
+    return negative_total == 0
+
+
 def _clean_email(v):
     """gosom's -email flag returns an 'emails' column that can hold more
     than one address (format not documented) - split on common
@@ -259,7 +292,15 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
             reader = csv.DictReader(f)
             if reader.fieldnames:
                 print(f"gosom CSV columns: {reader.fieldnames}", file=sys.stderr)
+            reviews_per_rating_logged = False
             for row in reader:
+                if not reviews_per_rating_logged:
+                    print(
+                        f"Sample reviews_per_rating value (verifying format assumption): "
+                        f"{row.get('reviews_per_rating')!r}",
+                        file=sys.stderr,
+                    )
+                    reviews_per_rating_logged = True
                 parsed = {
                     "name": _first_present(row, COLUMN_ALIASES["name"]),
                     "google_maps_url": _first_present(row, COLUMN_ALIASES["google_maps_url"]),
@@ -268,6 +309,7 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
                     "rating": _to_float(_first_present(row, COLUMN_ALIASES["rating"])),
                     "phone": _first_present(row, COLUMN_ALIASES["phone"]),
                     "email": _first_present(row, COLUMN_ALIASES["email"], transform=_clean_email),
+                    "skip_scan": _has_confirmed_no_negative_history(row.get("reviews_per_rating")),
                 }
                 all_results.append(parsed)
                 if _matches_location(row, city):
@@ -390,9 +432,29 @@ def main():
         scan_id = log_run(args.keyword, args.city, len(saved_businesses), status="running")
         print(f"Discovery done: {len(saved_businesses)} businesses saved for '{args.keyword}' in '{args.city}'")
 
-        if saved_businesses:
+        # Skip the slow (~90s) per-business review scan entirely for
+        # businesses gosom's own reviews_per_rating breakdown shows have
+        # NEVER had a single negative review - if there's zero 1-3 star
+        # reviews in the business's whole history, there's certainly none
+        # in just the last 90 days either. This doesn't speed up scanning
+        # a business up - it skips businesses that were never going to
+        # produce a lead in the first place, so more of the time budget
+        # goes to businesses that could actually have one.
+        clean_urls = {
+            r["google_maps_url"] for r in results if r.get("skip_scan") and r.get("google_maps_url")
+        }
+        businesses_to_scan = [b for b in saved_businesses if b["google_maps_url"] not in clean_urls]
+        skipped_clean = len(saved_businesses) - len(businesses_to_scan)
+        if skipped_clean:
+            print(
+                f"Skipping the review scan for {skipped_clean} business(es) with zero negative reviews "
+                f"ever (per gosom's own rating breakdown) - scanning {len(businesses_to_scan)} of "
+                f"{len(saved_businesses)}."
+            )
+
+        if businesses_to_scan:
             summary = scan_many(
-                saved_businesses,
+                businesses_to_scan,
                 run_type="discover",
                 keyword=args.keyword,
                 city=args.city,

@@ -60,6 +60,8 @@ See [`SETUP.md`](./SETUP.md) for a full step-by-step deployment guide — Supaba
 
 ## What's new
 
+- **Skips businesses that could never have a negative review.** gosom's own search results include a rating breakdown per business (how many 1-star, 2-star, etc. reviews it has, all-time). If that breakdown shows zero 1-3 star reviews ever, the business is skipped entirely for the (slow, ~90s) review scan — it certainly can't have a negative in just the last 90 days if it's never had one at all. Any uncertainty (missing/unparseable data) defaults to scanning it anyway, so this only ever skips businesses it's fully confident about, never a real lead. Tested against 13 different data-shape scenarios (clean, has negatives, malformed, missing, wrong types) before shipping.
+
 A few small additions on top of the original build:
 
 - **Discover now scans reviews automatically, in the same run.** Search a profession+city and it finds the businesses AND scans every one of their reviews for negatives, all in one workflow run — no separate manual "Scan all reviews for negatives" step needed anymore. Negatives now show automatically on EVERY path into a search's results, not just a fresh search — clicking a "Discovery search" row in My Businesses' Recent Activity, or a page refresh restoring the last search, both land straight on the negative reviews too (previously these could land on what looked like a blank page until "Show negative reviews" was clicked manually). Each review has a "+" to add straight to the watch list — the plain business list (no negative found yet) is no longer shown separately, since the whole point is finding leads, not browsing everything.
