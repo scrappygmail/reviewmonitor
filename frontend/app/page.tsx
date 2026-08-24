@@ -542,14 +542,14 @@ function DiscoverTab({
     setSavedSearches(combos);
   }
 
-  async function runDiscovery() {
+  async function runDiscovery(fast: boolean = false) {
     const trimmedKeyword = keyword.trim();
     const trimmedCity = city.trim();
     if (!trimmedKeyword || !trimmedCity) return;
     setStarting(true);
     onStart();
     try {
-      const res = await fetch("/api/discover", {
+      const res = await fetch(fast ? "/api/discover-fast" : "/api/discover", {
         method: "POST",
         body: JSON.stringify({ keyword: trimmedKeyword, city: trimmedCity }),
       });
@@ -738,13 +738,21 @@ function DiscoverTab({
             className="flex-1 border border-line rounded-lg px-4 py-2.5 text-sm focus-ring outline-none"
           />
           <button
-            onClick={runDiscovery}
+            onClick={() => runDiscovery(false)}
             disabled={starting}
             className="bg-brand-500 hover:bg-brand-600 text-white font-semibold text-sm rounded-lg px-5 py-2.5 focus-ring disabled:opacity-50"
           >
             {starting ? "Starting…" : "Search"}
           </button>
         </div>
+        <button
+          onClick={() => runDiscovery(true)}
+          disabled={starting}
+          title="Skips email lookup entirely for max speed - phone numbers are unaffected"
+          className="mt-3 text-xs font-semibold text-brand-600 border border-brand-400 rounded-full px-3 py-1.5 hover:bg-brand-50 focus-ring disabled:opacity-50"
+        >
+          ⚡ Fast search (numbers only, no email)
+        </button>
       </div>
 
       {savedSearches.length > 0 && !keywordsCleared && (

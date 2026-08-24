@@ -252,7 +252,7 @@ def _matches_location(row: dict, location: str) -> bool:
     return True
 
 
-def run_gosom_search(keyword: str, city: str) -> list[dict]:
+def run_gosom_search(keyword: str, city: str, skip_email: bool = False) -> list[dict]:
     query = f"{keyword} {city}"
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -262,28 +262,31 @@ def run_gosom_search(keyword: str, city: str) -> list[dict]:
             f.write(query + "\n")
         open(results_path, "w").close()  # docker needs the file to exist to bind-mount it
 
-        subprocess.run(
-            [
-                "docker", "run", "--rm",
-                "-v", f"{queries_path}:/queries.txt:ro",
-                "-v", f"{results_path}:/results.csv",
-                "gosom/google-maps-scraper",
-                "-input", "/queries.txt",
-                "-results", "/results.csv",
-                # depth = how many times it scrolls the results list to load
-                # more listings (engine default is 10; 30 gets a fuller list
-                # per keyword+city search without taking too long).
-                "-depth", "30",
-                # visits each business's website looking for a contact email -
-                # gosom's own docs warn this "increases processing time
-                # significantly", which is why the timeout below and the
-                # workflow's timeout-minutes were both bumped up to match.
-                "-email",
-                "-exit-on-inactivity", "3m",
-            ],
-            check=True,
-            timeout=60 * 50,
-        )
+        docker_args = [
+            "docker", "run", "--rm",
+            "-v", f"{queries_path}:/queries.txt:ro",
+            "-v", f"{results_path}:/results.csv",
+            "gosom/google-maps-scraper",
+            "-input", "/queries.txt",
+            "-results", "/results.csv",
+            # depth = how many times it scrolls the results list to load
+            # more listings (engine default is 10; 30 gets a fuller list
+            # per keyword+city search without taking too long).
+            "-depth", "30",
+            "-exit-on-inactivity", "3m",
+        ]
+        if not skip_email:
+            # visits each business's website looking for a contact email -
+            # gosom's own docs warn this "increases processing time
+            # significantly": it has to load an unpredictable, unrelated
+            # third-party site per business (unlike the rest of this data,
+            # which all comes straight off Google's own Maps listing -
+            # phone number included, so skipping this does NOT affect
+            # phone). skip_email=True (the "Fast" search) leaves this out
+            # entirely for max discovery speed.
+            docker_args.append("-email")
+
+        subprocess.run(docker_args, check=True, timeout=60 * 50)
 
         results = []
         all_results = []
@@ -408,6 +411,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
     parser.add_argument("--city", required=True, help="City, or 'City, State' / 'City, State, Country' for an exact scope")
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Skip email extraction (-email) entirely for max discovery speed - phone numbers are "
+             "unaffected since those come straight off the Maps listing, not a business's website.",
+    )
     args = parser.parse_args()
     args.keyword = args.keyword.strip()
     args.city = args.city.strip()
@@ -420,7 +429,7 @@ def main():
 
     scan_id = None
     try:
-        results = run_gosom_search(args.keyword, args.city)
+        results = run_gosom_search(args.keyword, args.city, skip_email=args.fast)
         saved_businesses = save_results(args.keyword, args.city, results)
         # Row starts as "running" - it doesn't flip to a real final status
         # until the review-scanning phase below finishes too, since this

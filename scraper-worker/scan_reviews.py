@@ -50,7 +50,7 @@ PER_BUSINESS_TIMEOUT_SECONDS = 90  # was 8 min - if a business isn't done in
 # anything, which is exactly the "83 minutes then nothing" problem this
 # fixes. This way a run always finishes cleanly and reports whatever it
 # found so far, instead of running long or getting cut off mid-write.
-TIME_BUDGET_SECONDS = 25 * 60
+TIME_BUDGET_SECONDS = 45 * 60
 
 SCAN_WINDOW_DAYS = 90
 
