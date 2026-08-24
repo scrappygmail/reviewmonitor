@@ -20,20 +20,21 @@ This only DRIVES the engine via config.yaml + its own `python start.py`
 CLI - none of its internals are touched.
 """
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
 import json
+import threading
 import time
 import yaml
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timezone, timedelta
 from db import get_client
 from notify_push import notify_scan_failed
 from job_status import start_job, update_progress, finish_job
 
 SCRAPER_DIR = os.environ.get("SCRAPER_ENGINE_DIR", "./google-reviews-scraper-pro")
-CONFIG_PATH = os.path.join(SCRAPER_DIR, "config.yaml")
-DB_PATH = os.path.join(SCRAPER_DIR, "reviews.db")
 
 PER_BUSINESS_TIMEOUT_SECONDS = 90  # was 8 min - if a business isn't done in
 # 90s (with a light ~10-review request), it's almost always Google
@@ -42,6 +43,14 @@ PER_BUSINESS_TIMEOUT_SECONDS = 90  # was 8 min - if a business isn't done in
 # hitting the OLD 8-min cap was enough to burn 30-40+ minutes on their own -
 # this was the single biggest cause of slow runs, not the review-checking
 # logic itself.
+
+# How many businesses get scraped AT ONCE. Deliberately conservative (not
+# maxed out) - there are no proxies configured, so this is a genuine
+# trade-off between speed and the risk of Google noticing/blocking the
+# repeated pattern from one IP. gosom's own docs warn about exactly this
+# with its own -c concurrency flag. Start here; can be tuned up or down
+# based on how real runs behave (errors/timeouts creeping up = dial back).
+SCAN_CONCURRENCY = 3
 
 # Hard internal cap on the WHOLE run (discovery + scanning together, once
 # job_start_time is threaded through from discover.py), checked between
@@ -64,14 +73,40 @@ _stop_requested = False
 def _handle_stop_signal(signum, _frame):
     global _stop_requested
     _stop_requested = True
-    print(f"Received signal {signum} - finishing the current business, then stopping with partial results saved.")
+    print(f"Received signal {signum} - finishing in-flight businesses, then stopping with partial results saved.")
 
 
 signal.signal(signal.SIGTERM, _handle_stop_signal)
 signal.signal(signal.SIGINT, _handle_stop_signal)
 
 
-def _write_config(business: dict):
+def _prepare_worker_dirs(n: int) -> list[str]:
+    """The review-scraping engine uses a FIXED config.yaml/reviews.db path
+    per directory - it was built assuming one business is scraped at a
+    time. Running businesses concurrently against the SAME directory would
+    mean worker A's config gets overwritten by worker B before A even
+    reads it, and both workers' reviews would land in the same sqlite
+    file with no reliable way to tell which review came from which
+    business (see _read_reviews_from_sqlite's "most recent row" trick,
+    which only works for exactly one business at a time).
+
+    So each concurrent slot gets its OWN full copy of the already-cloned
+    engine directory instead - slot 0 reuses the original clone (no copy
+    needed), slots 1..n-1 are cheap filesystem copies of it (no re-clone,
+    no re-pip-install, just files). This is what actually makes
+    concurrent scanning safe rather than just fast."""
+    worker_dirs = [SCRAPER_DIR]
+    parent = os.path.dirname(os.path.abspath(SCRAPER_DIR)) or "."
+    base_name = os.path.basename(os.path.abspath(SCRAPER_DIR))
+    for i in range(1, n):
+        worker_dir = os.path.join(parent, f"{base_name}_worker_{i}")
+        if not os.path.isdir(worker_dir):
+            shutil.copytree(SCRAPER_DIR, worker_dir)
+        worker_dirs.append(worker_dir)
+    return worker_dirs
+
+
+def _write_config(business: dict, scraper_dir: str):
     window_start = (datetime.now(timezone.utc) - timedelta(days=SCAN_WINDOW_DAYS)).strftime("%Y-%m-%d")
 
     config = {
@@ -105,28 +140,29 @@ def _write_config(business: dict):
             {"url": business["google_maps_url"], "custom_params": {"company": business["name"]}}
         ],
     }
-    with open(CONFIG_PATH, "w") as f:
+    with open(os.path.join(scraper_dir, "config.yaml"), "w") as f:
         yaml.safe_dump(config, f)
 
 
-def _run_scraper():
+def _run_scraper(scraper_dir: str):
     subprocess.run(
         ["python", "start.py", "-q"],
-        cwd=SCRAPER_DIR,
+        cwd=scraper_dir,
         check=True,
         timeout=PER_BUSINESS_TIMEOUT_SECONDS,
     )
 
 
-def _read_reviews_from_sqlite(business_id: str) -> list[dict]:
+def _read_reviews_from_sqlite(business_id: str, scraper_dir: str) -> list[dict]:
     """
-    Since we scrape exactly one business per call, the most-recently
-    inserted row in the engine's own `places` table is always the
-    business we just scraped - this avoids depending on knowing the
-    exact column name the engine uses for the source URL (which isn't
-    documented and turned out not to be literally "url").
+    Since each worker directory scrapes exactly one business at a time
+    (that's the whole point of the per-worker isolation above), the
+    most-recently inserted row in the engine's own `places` table is
+    always the business that worker just scraped - this avoids depending
+    on knowing the exact column name the engine uses for the source URL
+    (which isn't documented and turned out not to be literally "url").
     """
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(os.path.join(scraper_dir, "reviews.db"))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
@@ -204,9 +240,12 @@ def _sync_reviews(client, reviews: list[dict], scan_id: str) -> tuple[int, int]:
     return new_count, negative_count
 
 
-def scan_one_business(client, business: dict, scan_id: str) -> dict:
-    """Scrapes and syncs a single business. Raises on scrape failure so the
-    caller can move on to the next business.
+def scan_one_business(client, business: dict, scan_id: str, scraper_dir: str) -> dict:
+    """Scrapes and syncs a single business using its own isolated
+    scraper_dir (see _prepare_worker_dirs) - safe to call concurrently
+    for different businesses as long as each call gets a distinct
+    scraper_dir. Raises on scrape failure so the caller can move on to
+    the next business.
 
     IMPORTANT limitation: _run_scraper() launches the review-scraping
     engine as a whole separate process (browser launch, page navigation,
@@ -217,12 +256,13 @@ def scan_one_business(client, business: dict, scan_id: str) -> dict:
     rest of an already-fully-scraped batch to Supabase - it does not (and
     structurally can't, without patching the engine itself) shorten the
     scrape time for that business. The real levers for speed here are
-    max_reviews (how much the engine has to scroll/load per business) and
+    max_reviews (how much the engine has to scroll/load per business),
     PER_BUSINESS_TIMEOUT_SECONDS (how long a stuck/blocked business is
-    allowed to hang before giving up on it)."""
-    _write_config(business)
-    _run_scraper()
-    reviews = _read_reviews_from_sqlite(business["id"])
+    allowed to hang before giving up on it), and SCAN_CONCURRENCY (how
+    many businesses get scraped in parallel)."""
+    _write_config(business, scraper_dir)
+    _run_scraper(scraper_dir)
+    reviews = _read_reviews_from_sqlite(business["id"], scraper_dir)
     new_count, negative_count = _sync_reviews(client, reviews, scan_id)
 
     client.table("businesses").update({
@@ -295,36 +335,78 @@ def scan_many(
     except Exception as e:
         print(f"Failed to start job status tracking: {e}")
 
-    for i, biz in enumerate(business_list, start=1):
-        if _stop_requested:
-            print("Stop button pressed - wrapping up now with results found so far, not discarding them.")
-            stopped_early = True
-            skipped = len(business_list) - i + 1
-            break
-        if time.monotonic() - start_time > TIME_BUDGET_SECONDS:
-            print(
-                f"Hit the {TIME_BUDGET_SECONDS // 60}-minute time budget after {i - 1} business(es) - "
-                f"wrapping up with results found so far instead of running long."
-            )
-            stopped_early = True
-            skipped = len(business_list) - i + 1
-            break
+    n_workers = max(1, min(SCAN_CONCURRENCY, len(business_list)))
+    worker_dirs = _prepare_worker_dirs(n_workers)
+    print(f"Scanning with {n_workers} concurrent worker(s) (SCAN_CONCURRENCY={SCAN_CONCURRENCY})")
 
-        print(f"--- Scanning {i}/{len(business_list)}: {biz['name']} ---")
+    results_lock = threading.Lock()
+    completed = 0
+
+    def _scan_task(worker_index: int, biz: dict):
+        scraper_dir = worker_dirs[worker_index % n_workers]
         try:
-            update_progress(i, biz["name"])
-        except Exception as e:
-            print(f"Failed to update job status: {e}")
-        try:
-            result = scan_one_business(client, biz, scan_id)
-            total_new += result["new_reviews"]
-            total_negative += result["negative"]
+            result = scan_one_business(client, biz, scan_id, scraper_dir)
+            return ("ok", biz["name"], result)
         except subprocess.TimeoutExpired:
-            errors += 1
-            print(f"Timed out scraping {biz['name']} - skipping, moving to next business")
+            return ("timeout", biz["name"], None)
         except subprocess.CalledProcessError as e:
-            errors += 1
-            print(f"Failed scraping {biz['name']}: {e}")
+            return ("error", biz["name"], str(e))
+
+    # Sliding window: keep up to n_workers businesses in flight at once.
+    # Each time one finishes, immediately submit the next one (if the time
+    # budget/stop flag still allow it) rather than waiting for the whole
+    # batch to complete before starting more - keeps all workers busy.
+    biz_iter = enumerate(business_list)
+    pending = {}
+    next_worker_slot = 0
+
+    def _submit_next() -> bool:
+        nonlocal next_worker_slot
+        if _stop_requested or (time.monotonic() - start_time > TIME_BUDGET_SECONDS):
+            return False
+        try:
+            _, biz = next(biz_iter)
+        except StopIteration:
+            return False
+        future = executor.submit(_scan_task, next_worker_slot, biz)
+        pending[future] = biz["name"]
+        next_worker_slot += 1
+        return True
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        for _ in range(n_workers):
+            if not _submit_next():
+                break
+
+        while pending:
+            done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
+            for done_future in done:
+                biz_name = pending.pop(done_future)
+                status, name, result = done_future.result()
+                completed += 1
+                with results_lock:
+                    if status == "ok":
+                        total_new += result["new_reviews"]
+                        total_negative += result["negative"]
+                    elif status == "timeout":
+                        errors += 1
+                        print(f"Timed out scraping {name} - skipping")
+                    elif status == "error":
+                        errors += 1
+                        print(f"Failed scraping {name}: {result}")
+                try:
+                    update_progress(completed, name)
+                except Exception as e:
+                    print(f"Failed to update job status: {e}")
+                print(f"--- Completed {completed}/{len(business_list)}: {biz_name} ({status}) ---")
+
+                _submit_next()
+
+    skipped = len(business_list) - completed
+    stopped_early = skipped > 0
+    if stopped_early:
+        reason = "Stop button pressed" if _stop_requested else f"hit the {TIME_BUDGET_SECONDS // 60}-minute time budget"
+        print(f"{reason} after {completed} business(es) - wrapping up with results found so far, not discarding them.")
 
     if stopped_early:
         status = "partial"
