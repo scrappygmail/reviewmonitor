@@ -351,6 +351,20 @@ def scan_many(
             return ("timeout", biz["name"], None)
         except subprocess.CalledProcessError as e:
             return ("error", biz["name"], str(e))
+        except Exception as e:
+            # Catches everything else too (sqlite errors, yaml/file issues,
+            # unexpected engine output, a flaky Supabase call, etc.) - a
+            # single business failing here must NEVER be allowed to crash
+            # the whole run and lose already-completed results. Previously
+            # only the two subprocess-specific exceptions above were
+            # caught; anything else propagated all the way up through
+            # scan_many() and got the ENTIRE scrape_logs row marked
+            # "failed" by discover.py's outer exception handler - even
+            # when most of the batch (99 businesses, 2 real negatives in
+            # one real run) had already succeeded and was safely synced.
+            import traceback
+            traceback.print_exc()
+            return ("error", biz["name"], f"{type(e).__name__}: {e}")
 
     # Sliding window: keep up to n_workers businesses in flight at once.
     # Each time one finishes, immediately submit the next one (if the time
@@ -382,7 +396,15 @@ def scan_many(
             done, _ = wait(pending.keys(), return_when=FIRST_COMPLETED)
             for done_future in done:
                 biz_name = pending.pop(done_future)
-                status, name, result = done_future.result()
+                try:
+                    status, name, result = done_future.result()
+                except Exception as e:
+                    # Belt-and-suspenders: _scan_task already catches
+                    # everything internally, but if a future somehow still
+                    # raises here (e.g. the executor itself misbehaving),
+                    # this must still not take down the whole run.
+                    status, name, result = "error", biz_name, f"{type(e).__name__}: {e}"
+                    print(f"Unexpected error retrieving result for {biz_name}: {result}")
                 completed += 1
                 with results_lock:
                     if status == "ok":
