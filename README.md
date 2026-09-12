@@ -36,7 +36,7 @@ Anyone who needs to track Google Maps reviews across multiple business listings 
 ## How it works
 
 ```
-Discover (on-demand)      →  businesses table  →  choose which to watch
+Discover       →  businesses table  →  choose which to watch
                                                           ↓
 Scheduled scan (6h)       →  new reviews diffed →  1-3★ ones trigger a push alert
 Rotation sweep (2x/day)   →  covers the full discovered list over time
