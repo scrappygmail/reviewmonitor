@@ -413,8 +413,7 @@ def scan_many(
                         total_negative += result["negative"]
                     elif status == "timeout":
                         errors += 1
-                        reason = f"{name}: timeout timeout"
-                    {PER_BUSINESS_TIMEOUT_SECONDS}s"
+                        reason = f"{name}: timeout {PER_BUSINESS_TIMEOUT_SECONDS}s"
                         error_details.append(reason)
                         print(f"Timed out scraping {name} - skipping")
                     elif status == "error":
@@ -437,20 +436,20 @@ def scan_many(
         print(f"{reason} after {completed} business(es) - wrapping up with results found so far, not discarding them.")
 
     if stopped_early:
-    status = "partial"
+        status = "partial"
 
-       if _stop_requested:
-        error_message = (
-            f"Stopped by user after {completed}/{len(business_list)} businesses."
-           )
-       else:
-        error_message = (
-            f"Time budget reached after {completed}/{len(business_list)} businesses. "
-            f"{skipped} business(es) were not scanned."
-           )
+        if _stop_requested:
+            error_message = (
+                f"Stopped by user after {completed}/{len(business_list)} businesses."
+            )
+        else:
+            error_message = (
+                f"Time budget reached after {completed}/{len(business_list)} businesses. "
+                f"{skipped} business(es) were not scanned."
+            )
 
-       if error_details:
-        error_message += " Errors: " + " | ".join(error_details)
+        if error_details:
+            error_message += " Errors: " + " | ".join(error_details)
 
     elif errors == 0:
         status = "success"
@@ -475,8 +474,7 @@ def scan_many(
 
     client.table("scrape_logs").update({
         "new_reviews_found": total_new,
-        "negative_reviews_found": 
-    total_negative,
+        "negative_reviews_found": total_negative,
         "status": status,
         "error_message": error_message,
     }).eq("id", scan_id).execute()
