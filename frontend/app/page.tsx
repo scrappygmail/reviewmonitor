@@ -37,6 +37,7 @@ type ScrapeLog = {
   new_reviews_found: number;
   negative_reviews_found: number;
   status: string;
+  error_message: string | null;
   ran_at: string;
 };
 
