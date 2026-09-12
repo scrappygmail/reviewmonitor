@@ -300,6 +300,7 @@ def scan_many(
     if this isn't passed, it falls back to timing from here instead."""
     client = get_client()
     total_new, total_negative, errors, skipped = 0, 0, 0, 0
+    error_details = []
     stopped_early = False
     start_time = job_start_time if job_start_time is not None else time.monotonic()
 
@@ -412,9 +413,14 @@ def scan_many(
                         total_negative += result["negative"]
                     elif status == "timeout":
                         errors += 1
+                        reason = f"{name}: timeout after
+                    {PER_BUSINESS_TIMEOUT_SECONDS}s"
+                        error_details.append(reason)
                         print(f"Timed out scraping {name} - skipping")
                     elif status == "error":
                         errors += 1
+                        reason = f"{name}: {result}"
+                        error_details.append(reason)
                         print(f"Failed scraping {name}: {result}")
                 try:
                     update_progress(completed, name)
@@ -431,18 +437,48 @@ def scan_many(
         print(f"{reason} after {completed} business(es) - wrapping up with results found so far, not discarding them.")
 
     if stopped_early:
-        status = "partial"
+    status = "partial"
+
+       if _stop_requested:
+        error_message = (
+            f"Stopped by user after {completed}/{len(business_list)} businesses."
+           )
+       else:
+        error_message = (
+            f"Time budget reached after {completed}/{len(business_list)} businesses. "
+            f"{skipped} business(es) were not scanned."
+           )
+
+       if error_details:
+        error_message += " Errors: " + " | ".join(error_details)
+
     elif errors == 0:
         status = "success"
+        error_message = None
+
     elif total_new or total_negative:
         status = "partial"
+        error_message = (
+            f"{errors} business scan(s) failed. "
+            f"Completed {completed}/{len(business_list)}."
+        )
+
+        if error_details:
+            error_message += " " + " | ".join(error_details)
+
     else:
         status = "failed"
+        error_message = (
+            f"{errors} business scan(s) failed. "
+            + " | ".join(error_details)
+        )
 
     client.table("scrape_logs").update({
         "new_reviews_found": total_new,
-        "negative_reviews_found": total_negative,
+        "negative_reviews_found": 
+    total_negative,
         "status": status,
+        "error_message": error_message,
     }).eq("id", scan_id).execute()
 
     try:
