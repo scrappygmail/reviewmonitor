@@ -413,7 +413,7 @@ def scan_many(
                         total_negative += result["negative"]
                     elif status == "timeout":
                         errors += 1
-                        reason = f"{name}: timeout after
+                        reason = f"{name}: timeout timeout"
                     {PER_BUSINESS_TIMEOUT_SECONDS}s"
                         error_details.append(reason)
                         print(f"Timed out scraping {name} - skipping")
