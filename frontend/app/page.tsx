@@ -1234,8 +1234,17 @@ function MyBusinessesTab({
                 <div className="flex items-center gap-3 text-xs text-muted whitespace-nowrap">
                   {log.status === "running" ? (
                     <span className="text-brand-600 font-medium">in progress…</span>
-                  ) : log.status === "failed" ? (
-                    <span className="text-alert-600 font-medium">failed</span>
+                  ) : log.status === "failed" || log.status === "partial" ? (
+                    <span
+                      className={`font-medium truncate max-w-[320px] ${
+                        log.status === "failed"
+                          ? "text-alert-600"
+                          : "text-muted"
+                      }`}
+                      title={log.error_message ?? log.status}
+                    >
+                      {log.error_message ?? log.status}
+                    </span>
                   ) : (
                     <button
                       onClick={() => openActivity(log)}
